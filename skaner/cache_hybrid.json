@@ -1,0 +1,30 @@
+{
+  "BIGTIMEUSDT": {
+    "cena_wejscia": 0.02218,
+    "czas": "01:08:00",
+    "timestamp_wejscia": 1766966880.000609,
+    "cykle": 0,
+    "max_zysk": 2.9305680793507727
+  },
+  "ARKUSDT": {
+    "cena_wejscia": 0.2677,
+    "czas": "01:08:00",
+    "timestamp_wejscia": 1766966880.000609,
+    "cykle": 0,
+    "max_zysk": 4.295853567426227
+  },
+  "ZBTUSDT": {
+    "cena_wejscia": 0.1036,
+    "czas": "01:18:00",
+    "timestamp_wejscia": 1766967480.0006454,
+    "cykle": 0,
+    "max_zysk": 0.09652509652509929
+  },
+  "ONTUSDT": {
+    "cena_wejscia": 0.0606,
+    "czas": "01:18:00",
+    "timestamp_wejscia": 1766967480.0006454,
+    "cykle": 0,
+    "max_zysk": 0.33003300330032803
+  }
+}

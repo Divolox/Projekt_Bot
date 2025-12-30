@@ -1,95 +1,115 @@
 import json
-import time
 import os
+import time
+import datetime
+# Importujemy nasz bank (musi być w tym samym folderze)
+import portfel_manager as pm
 
-# ŚcieżKI
-STRATEGIE_TEMP = "strategie.json"       # Tu Mózg wrzuca propozycje
-STRATEGIE_DB = "strategie_bota.json"    # Tu jest Twoja historia i aktywne
-RYNEK_PATH = "rynek.json"               # Stąd bierzemy aktualną cenę
+# ==========================================
+# ⚙️ KONFIGURACJA PLIKÓW
+# ==========================================
+PLIK_MOZGU = "mozg.json"                # Decyzje AI
+PLIK_RYNKU = "rynek.json"               # Aktualne ceny (z Obserwatora)
+PLIK_STRATEGII_INPUT = "strategie.json" # Nowe pomysły (Skrzynka odbiorcza)
+STRATEGIE_DB = "strategie_bota.json"    # Aktywne pozycje (Księga główna)
 
-def wczytaj_json(sciezka):
-    if os.path.exists(sciezka):
-        try:
-            with open(sciezka, "r", encoding="utf-8") as f: return json.load(f)
-        except: return [] if "strategie" in sciezka else {}
-    return [] if "strategie" in sciezka else {}
-
-def zapisz_json(sciezka, dane):
+def wczytaj_json(plik):
+    """Pomocnicza funkcja do bezpiecznego wczytywania JSON"""
+    if not os.path.exists(plik):
+        return {}
     try:
-        with open(sciezka, "w", encoding="utf-8") as f: json.dump(dane, f, indent=2)
-    except: pass
+        with open(plik, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"⚠️ Błąd odczytu {plik}: {e}")
+        return {}
 
-def main():
-    print(f"🔄 SCHEDULER: Przetwarzanie zleceń...")
-    
-    # 1. Wczytaj dane
-    nowe_propozycje = wczytaj_json(STRATEGIE_TEMP)
-    baza_strategii = wczytaj_json(STRATEGIE_DB)
-    rynek = wczytaj_json(RYNEK_PATH)
-    
-    zmiany = False
-    teraz = time.time()
+def zapisz_json(plik, dane):
+    """Pomocnicza funkcja do zapisu JSON"""
+    try:
+        with open(plik, "w") as f:
+            json.dump(dane, f, indent=4)
+    except Exception as e:
+        print(f"⚠️ Błąd zapisu {plik}: {e}")
 
-    # 2. NAPRAWA ZOMBIE (Te co wiszą jako "oczekuje")
-    # Jeśli coś wisi w bazie jako "oczekuje", to musimy to popchnąć.
-    for s in baza_strategii:
-        if s.get('status') == 'oczekuje':
-            # Sprawdź wiek strategii
-            czas_utworzenia = s.get('czas_utworzenia', teraz)
-            # Fix dla daty w formacie string (ISO) z jsona
-            if isinstance(czas_utworzenia, str): 
-                # Jeśli to stary string, to uznajemy że jest sprzed chwili, żeby ją aktywować
-                # Albo po prostu olewamy wiek i aktywujemy.
-                pass 
-            
-            print(f"   🔧 NAPRAWIAM ZOMBIE: {s['symbol']} ({s['typ']}) -> AKTYWNA")
-            s['status'] = 'aktywna'
-            # Aktualizujemy czas startu na TERAZ, żeby Ewaluator nie zamknął jej od razu za "time out"
-            s['czas_start_ts'] = teraz 
-            zmiany = True
+def wykonaj_zlecenia():
+    print(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] 🤖 SCHEDULER: Rozpoczynam cykl...")
 
-    # 3. PRZETWARZANIE NOWYCH (Z Mózgu)
-    if nowe_propozycje:
-        for s in nowe_propozycje:
-            sym = s['symbol']
-            
-            # Pobierz aktualną cenę z rynku (dla precyzji)
-            cena_start = s.get('start_price') # Domyślnie to co dał mózg
-            if sym in rynek.get('data', {}):
-                try:
-                    cena_start = rynek['data'][sym]['1h'][-1]['c']
-                except: pass
-            
-            # Ustawiamy parametry startowe
-            s['status'] = 'aktywna'  # <--- TU BYŁ BŁĄD WCZEŚNIEJ
-            s['cena_start'] = cena_start
-            s['czas_start_ts'] = teraz
-            s['czas_utworzenia_str'] = time.strftime('%Y-%m-%d %H:%M:%S')
-            
-            # Sprawdź czy takiej już nie ma (żeby nie dublować)
-            juz_jest = False
-            for stary in baza_strategii:
-                if stary.get('status') == 'aktywna' and stary['symbol'] == sym and stary['typ'] == s['typ']:
-                    juz_jest = True
-                    break
-            
-            if not juz_jest:
-                print(f"   ✅ AKTYWACJA: {sym} [{s['typ']}] po cenie {cena_start}")
-                baza_strategii.append(s)
-                zmiany = True
-            else:
-                print(f"   ⚠️ Ignoruję dubel: {sym} [{s['typ']}]")
+    # 1. Wczytujemy dane
+    decyzja = wczytaj_json(PLIK_MOZGU)
+    rynek = wczytaj_json(PLIK_RYNKU)
+    aktywne_pozycje = wczytaj_json(STRATEGIE_DB)
 
-        # Wyczyść plik tymczasowy (bo już przyjęliśmy zlecenia)
-        zapisz_json(STRATEGIE_TEMP, [])
+    # 2. Sprawdzamy, czy Mózg dał sygnał KUP
+    timestamp_decyzji = decyzja.get("timestamp", 0)
+    akcja = decyzja.get("akcja", "").upper()
+    symbol = decyzja.get("symbol")
 
-    # 4. ZAPISZ WSZYSTKO
-    if zmiany:
-        zapisz_json(STRATEGIE_DB, baza_strategii)
-        print("   💾 Baza strategii zaktualizowana.")
+    # Walidacja czasu (czy sygnał nie jest przestarzały > 30 min)
+    if time.time() - timestamp_decyzji > 1800:
+        print("   (Decyzja mózgu jest stara - pomijam)")
+        return
+
+    # 3. Logika otwierania pozycji
+    if akcja == "KUP" and symbol:
+        # Sprawdzamy, czy już nie mamy tego coina w aktywnych
+        if symbol in aktywne_pozycje:
+            print(f"⚠️ {symbol} jest już w aktywnych strategiach. Pomijam dublowanie.")
+            return
+
+        # Pobieramy AKTUALNĄ cenę z rynku (a nie z mózgu!)
+        # Rynek.json ma strukturę { "BTCUSDT": { "price": 95000, ... } }
+        dane_rynkowe = rynek.get(symbol, {})
+        aktualna_cena = float(dane_rynkowe.get("price", 0.0))
+
+        if aktualna_cena <= 0:
+            print(f"⛔ Błąd: Brak ceny dla {symbol} w {PLIK_RYNKU}!")
+            return
+
+        print(f"   💡 Wykryto sygnał KUP dla {symbol}. Cena rynkowa: {aktualna_cena}")
+
+        # --- TUTAJ WCHODZI PORTFEL MANAGER ---
+        # Próbujemy pobrać środki z wirtualnego portfela
+        # Źródło oznaczamy jako 'MAIN_BOT', żeby Evaluator wiedział, że to jego działka
+        sukces, ilosc_kupiona, koszt_usdt = pm.pobierz_srodki(
+            symbol, 
+            aktualna_cena, 
+            procent_kapitalu=0.10, 
+            zrodlo="MAIN_BOT"
+        )
+
+        if sukces:
+            print(f"   ✅ ZAKUP UDANY! Zainwestowano: {koszt_usdt:.2f} USDT")
+            
+            # Tworzymy wpis do bazy strategii (Tak jak w Twoim oryginale)
+            nowa_strategia = {
+                "symbol": symbol,
+                "typ": decyzja.get("strategia", "STANDARD"), # Np. wybicie, korekta
+                "status": "OTWARTA",
+                "cena_wejscia": aktualna_cena,
+                "czas_wejscia": time.time(),
+                "ilosc": ilosc_kupiona,
+                "max_zysk": 0.0, # Do śledzenia trailng stopa
+                "analiza_ai": decyzja.get("analiza", "Brak danych")
+            }
+
+            # Dodajemy do bazy aktywnych (strategie_bota.json)
+            aktywne_pozycje[symbol] = nowa_strategia
+            zapisz_json(STRATEGIE_DB, aktywne_pozycje)
+            print(f"   💾 Zapisano pozycję w {STRATEGIE_DB}")
+
+            # Czyścimy mózg (zmieniamy status na ZREALIZOWANO), żeby nie kupił znowu
+            decyzja["akcja"] = "ZREALIZOWANO"
+            decyzja["timestamp"] = time.time() # Odświeżamy czas, żeby wiedzieć kiedy zrealizowano
+            zapisz_json(PLIK_MOZGU, decyzja)
+
+        else:
+            print(f"   ⛔ BRAK ŚRODKÓW W PORTFELU na zakup {symbol}!")
+
+    elif akcja == "ZREALIZOWANO":
+        print("   (Ostatnia decyzja została już zrealizowana)")
     else:
-        print("   (Brak nowych zleceń)")
+        print("   (Brak nowych sygnałów zakupu)")
 
 if __name__ == "__main__":
-    main()
-
+    wykonaj_zlecenia()

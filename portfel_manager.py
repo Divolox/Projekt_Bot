@@ -1,115 +1,139 @@
 import json
 import os
 import time
-import random
-
-# ==========================================
-# 🏦 SYSTEM FINANSOWY V2 (Bezpieczny zapis)
-# ==========================================
 
 PLIK_PORTFELA = "portfel.json"
-PROWIZJA_BINANCE = 0.00075  
-START_SALDO = 1000.00       
 
 def wczytaj_portfel():
-    """Wczytuje stan konta. Ponawia próby w razie blokady pliku."""
-    # Próbujemy 5 razy zanim się poddamy (zabezpieczenie przed resetem)
-    for i in range(5):
-        if os.path.exists(PLIK_PORTFELA):
-            try:
-                with open(PLIK_PORTFELA, "r") as f:
-                    dane = json.load(f)
-                    # Walidacja
-                    if "saldo_gotowka" not in dane: dane["saldo_gotowka"] = START_SALDO
-                    if "pozycje" not in dane: dane["pozycje"] = {}
-                    return dane
-            except Exception:
-                # Jeśli błąd (np. plik zajęty), czekamy losowy ułamek sekundy
-                time.sleep(random.uniform(0.1, 0.3))
-                continue
-    
-    # Jeśli po 5 próbach dalej nie działa, dopiero wtedy (ostateczność) lub jeśli plik nie istnieje
     if not os.path.exists(PLIK_PORTFELA):
-        nowy_portfel = {
-            "saldo_gotowka": START_SALDO,
-            "historia_transakcji": 0,
-            "pozycje": {}
+        # Tworzymy nowy portfel, jeśli nie istnieje
+        startowy = {
+            "saldo_gotowka": 1000.0,
+            "saldo_poczatkowe": 1000.0,
+            "pozycje": {},
+            "historia": []
         }
-        zapisz_portfel(nowy_portfel)
-        return nowy_portfel
-    
-    # Jeśli plik istnieje ale jest uszkodzony, zwracamy pusty (ale nie nadpisujemy od razu)
-    return {"saldo_gotowka": 0, "pozycje": {}} 
+        zapisz_portfel(startowy)
+        return startowy
+    try:
+        with open(PLIK_PORTFELA, 'r') as f:
+            dane = json.load(f)
+            # --- FIX CHIRURGICZNY: Zabezpieczenie struktury ---
+            if "historia" not in dane: dane["historia"] = []
+            if "pozycje" not in dane: dane["pozycje"] = {}
+            if "saldo_gotowka" not in dane: dane["saldo_gotowka"] = 1000.0
+            return dane
+    except:
+        return {"saldo_gotowka": 1000.0, "pozycje": {}, "historia": []}
 
 def zapisz_portfel(dane):
-    """Zapisuje stan konta. Ponawia próby."""
-    for i in range(5):
-        try:
-            # Zapis tymczasowy + podmiana (atomowy zapis) jest bezpieczniejszy
-            tmp_file = PLIK_PORTFELA + ".tmp"
-            with open(tmp_file, "w") as f:
-                json.dump(dane, f, indent=2)
-            
-            # W Windows replace może się wywalić jak plik zajęty, w Linux (Termux) jest atomowy
-            os.replace(tmp_file, PLIK_PORTFELA)
-            return
-        except Exception:
-            time.sleep(random.uniform(0.1, 0.3))
-            continue
+    try:
+        with open(PLIK_PORTFELA, 'w') as f:
+            json.dump(dane, f, indent=4)
+    except Exception as e:
+        print(f"⚠️ Błąd zapisu portfela: {e}")
 
 def oblicz_wartosc_total():
+    """
+    Sumuje gotówkę + wartość WSZYSTKICH otwartych pozycji (Skaner + Main Bot).
+    Naprawia błąd 'fałszywej straty' gdy Main Bot trzyma pozycje.
+    """
     portfel = wczytaj_portfel()
-    wartosc_aktywow = sum([p['wartosc_wejscia'] for p in portfel.get('pozycje', {}).values()])
-    return portfel.get("saldo_gotowka", 0) + wartosc_aktywow
+    gotowka = portfel.get("saldo_gotowka", 0.0)
+    wartosc_pozycji = 0.0
+    
+    # Sumujemy wartość wszystkich pozycji (ilość * cena wejścia)
+    # To jest estymacja 'cost basis'. 
+    # Dokładna wycena live jest w logach poszczególnych botów.
+    for symbol, poz in portfel.get("pozycje", {}).items():
+        # --- FIX: Bezpieczne pobieranie ilości ---
+        ilosc = float(poz.get("ilosc", 0))
+        cena_wejscia = float(poz.get("cena_wejscia", 0))
+        
+        # Jeśli ilość jest 0, próbujemy ratować z wartości
+        if ilosc == 0 and cena_wejscia > 0:
+             wartosc_wej = float(poz.get("wartosc_wejscia", 0))
+             if wartosc_wej > 0: ilosc = wartosc_wej / cena_wejscia
+             
+        wartosc_pozycji += (ilosc * cena_wejscia)
+        
+    return gotowka + wartosc_pozycji
 
-def pobierz_srodki(symbol, aktualna_cena, procent_kapitalu=0.10, zrodlo="MAIN_BOT"):
+def pobierz_srodki(symbol, cena_aktualna, procent_kapitalu=0.10, zrodlo="SKANER"):
+    portfel = wczytaj_portfel()
+    saldo = portfel["saldo_gotowka"]
+    
+    # Main Bot ma inne zasady (stała kwota lub % całego portfela)
+    # Skaner bierze % dostępnej gotówki
+    
+    kwota_inwestycji = saldo * procent_kapitalu
+    
+    # Zabezpieczenie minimalne (np. 11 USDT na Binance)
+    if kwota_inwestycji < 12:
+        kwota_inwestycji = 12
+        
+    if saldo < kwota_inwestycji:
+        return False, 0, 0 # Brak środków
+
+    ilosc_kupiona = kwota_inwestycji / cena_aktualna
+    
+    # Aktualizacja portfela
+    portfel["saldo_gotowka"] -= kwota_inwestycji
+    
+    nowa_pozycja = {
+        "symbol": symbol,
+        "ilosc": ilosc_kupiona,
+        "cena_wejscia": cena_aktualna,
+        "wartosc_wejscia": kwota_inwestycji,
+        "czas_zakupu": time.time(),
+        "timestamp_wejscia": time.time(), # Dla Skanera
+        "max_zysk": 0.0,
+        "zrodlo": zrodlo # Ważne: Rozróżnia SKANER od MAIN_BOT
+    }
+    
+    portfel["pozycje"][symbol] = nowa_pozycja
+    zapisz_portfel(portfel)
+    
+    return True, ilosc_kupiona, kwota_inwestycji
+
+def zwroc_srodki(symbol, cena_wyjscia, zrodlo=None):
+    # Parametr 'zrodlo' jest opcjonalny dla kompatybilności wstecznej
     portfel = wczytaj_portfel()
     
-    # Zabezpieczenie przed pustym odczytem
-    if "saldo_gotowka" not in portfel: return False, 0, 0
-
-    wartosc_aktywow = sum([p['wartosc_wejscia'] for p in portfel['pozycje'].values()])
-    wartosc_total = portfel["saldo_gotowka"] + wartosc_aktywow
-    
-    stawka = wartosc_total * procent_kapitalu
-    if stawka < 10: stawka = 10 
-    
-    if portfel["saldo_gotowka"] >= stawka:
-        prowizja = stawka * PROWIZJA_BINANCE
-        netto_usdt = stawka - prowizja
-        ilosc_coinow = netto_usdt / aktualna_cena
+    if symbol not in portfel["pozycje"]:
+        return 0.0
         
-        portfel["saldo_gotowka"] -= stawka
-        portfel["pozycje"][symbol] = {
-            "cena_wejscia": aktualna_cena,
-            "ilosc_coinow": ilosc_coinow,
-            "wartosc_wejscia": stawka,
-            "timestamp_wejscia": time.time(),
-            "zrodlo": zrodlo,
-            "max_zysk": 0.0
-        }
-        zapisz_portfel(portfel)
-        return True, ilosc_coinow, stawka
+    pozycja = portfel["pozycje"][symbol]
     
-    return False, 0, 0
-
-def zwroc_srodki(symbol, cena_wyjscia):
-    portfel = wczytaj_portfel()
+    # --- FIX: Bezpieczne pobieranie ilości (z ratunkiem) ---
+    ilosc = float(pozycja.get("ilosc", 0))
+    if ilosc == 0:
+        c_wej = float(pozycja.get("cena_wejscia", 1))
+        v_wej = float(pozycja.get("wartosc_wejscia", 0))
+        if c_wej > 0: ilosc = v_wej / c_wej
     
-    if symbol in portfel.get("pozycje", {}):
-        pos = portfel["pozycje"][symbol]
-        
-        wartosc_brutto = pos["ilosc_coinow"] * cena_wyjscia
-        wartosc_netto = wartosc_brutto * (1 - PROWIZJA_BINANCE)
-        
-        portfel["saldo_gotowka"] += wartosc_netto
-        if "historia_transakcji" in portfel:
-            portfel["historia_transakcji"] += 1
-        
-        zysk_usdt = wartosc_netto - pos["wartosc_wejscia"]
-        
-        del portfel["pozycje"][symbol]
-        zapisz_portfel(portfel)
-        return zysk_usdt
+    # Obliczamy wartość przy wyjściu
+    wartosc_wyjscia = ilosc * cena_wyjscia
+    zysk_netto = wartosc_wyjscia - float(pozycja.get("wartosc_wejscia", 0))
     
-    return 0.0
+    # Aktualizacja salda
+    portfel["saldo_gotowka"] += wartosc_wyjscia
+    
+    # Zapis historii
+    wpis_historia = {
+        "symbol": symbol,
+        "zysk": zysk_netto,
+        "procent": ((cena_wyjscia - float(pozycja.get("cena_wejscia", 1))) / float(pozycja.get("cena_wejscia", 1))) * 100,
+        "zrodlo": pozycja.get("zrodlo", "NIEZNANE"),
+        "czas": time.strftime('%Y-%m-%d %H:%M:%S')
+    }
+    
+    # --- FIX: Zabezpieczenie przed brakiem listy historii ---
+    if "historia" not in portfel: portfel["historia"] = []
+    portfel["historia"].append(wpis_historia)
+    
+    # Usuwamy pozycję
+    del portfel["pozycje"][symbol]
+    
+    zapisz_portfel(portfel)
+    return zysk_netto

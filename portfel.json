@@ -1,6 +1,23 @@
 {
-  "saldo_gotowka": 1000.0,
+  "saldo_gotowka": 785.3585344248739,
   "wartosc_total": 1000.0,
-  "historia_transakcji": 0,
-  "pozycje": {}
+  "historia_transakcji": 25,
+  "pozycje": {
+    "BTCUSDT": {
+      "cena_wejscia": 88599.69,
+      "ilosc_coinow": 0.0011278256165456108,
+      "wartosc_wejscia": 100.0,
+      "timestamp_wejscia": 1767108955.8095088,
+      "zrodlo": "MAIN_BOT",
+      "max_zysk": 0.0
+    },
+    "LUNAUSDT": {
+      "cena_wejscia": 0.0978,
+      "ilosc_coinow": 1004.0451567711302,
+      "wartosc_wejscia": 98.26931832095725,
+      "timestamp_wejscia": 1767189252.838496,
+      "zrodlo": "SKANER",
+      "max_zysk": 5.41922290388548
+    }
+  }
 }

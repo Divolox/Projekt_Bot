@@ -1,11 +1,9 @@
 import google.generativeai as genai
 import os
 import time
-import json
-import re
 
 # --- KONFIGURACJA ---
-API_KEY = "." 
+API_KEY = "."  # Twój klucz jest tutaj bezpieczny
 
 if os.getenv("GEMINI_API_KEY"):
     API_KEY = os.getenv("GEMINI_API_KEY")
@@ -16,26 +14,6 @@ except Exception as e:
     print(f"❌ Błąd konfiguracji klucza: {e}")
 
 MODEL_NAME = "models/gemini-flash-latest"
-
-def clean_and_parse_json(text):
-    """
-    To jest ta funkcja 'konwertująca'.
-    Bierze brudny tekst od AI i robi z niego zrozumiałą dla Pythona Listę/Słownik.
-    """
-    try:
-        # 1. Usuwamy znaczniki Markdown (```json ... ```)
-        text = text.replace("```json", "").replace("```", "").strip()
-        
-        # 2. Próbujemy znaleźć JSON w tekście (jeśli AI dodało jakiś wstęp)
-        match = re.search(r'(\{.*\}|\[.*\])', text, re.DOTALL)
-        if match:
-            text = match.group(0)
-            
-        # 3. Konwersja tekstu na obiekt Python (Lista lub Słownik)
-        return json.loads(text)
-    except json.JSONDecodeError:
-        print(f"⚠️ Błąd: AI zwróciło tekst, którego nie da się zamienić na kod: {text[:50]}...")
-        return None
 
 def ask_ai(prompt, retries=3):
     system_instruction = (
@@ -63,9 +41,9 @@ def ask_ai(prompt, retries=3):
                 )
                 
                 if response.text:
-                    # TUTAJ ROBIMY KONWERSJĘ
-                    # Zwracamy gotowy obiekt (Listę/Słownik), a nie tekst!
-                    return clean_and_parse_json(response.text)
+                    # POPRAWKA: Zwracamy surowy tekst. 
+                    # Parsowaniem zajmie się strategia_helper (extract_knowledge)
+                    return response.text
                 else:
                     print(f"   ⚠️ [DEBUG] Pusta odpowiedź od Google (Próba {attempt+1})")
             

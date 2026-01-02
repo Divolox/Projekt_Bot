@@ -24,7 +24,7 @@ def save_brain(brain):
 
 def przygotuj_historie():
     strategie = wczytaj_strategie_bota()
-    ocenione = [s for s in strategie if s.get("status") == "oceniona"]
+    ocenione = [s for s in strategie if isinstance(s, dict) and s.get("status") == "oceniona"]
     ocenione.sort(key=lambda x: x.get("czas_utworzenia", ""), reverse=True)
     if not ocenione: return "Brak historii."
     raport = ""
@@ -38,43 +38,39 @@ def przygotuj_historie():
 # =========================================================
 # 🧠 INTELIGENTNY ALGORYTM (Adaptacyjny)
 # =========================================================
-def analiza_techniczna_zapasowa(typ, market_data):
+def analiza_techniczna_zapasowa(typ, market_data, zablokowane_pary=[]):
     kandydaci = []
     mapa_int = {"godzinowa": "1h", "4-godzinna": "4h", "jednodniowa": "1d", "tygodniowa": "1w"}
     interwal = mapa_int.get(typ, "1h")
 
-    # --- 1. SPRAWDZAMY SENTYMENT RYNKU ---
     try:
         fng = int(market_data.get("sentiment", {}).get("value", 50))
     except: fng = 50
 
-    # --- 2. AUTOMATYCZNE DOSTRAJANIE (AUTOPILOT) ---
-    
-    # Domyślne wartości (Neutralne)
     limit_rsi_dip = 45
     min_vol_ratio = 1.0
     tryb = "NEUTRALNY"
 
     if fng <= 35: 
-        # FEAR (Strach - To co mamy teraz): ZACISKAMY PAS
         tryb = "DEFENSYWNY (Strach)"
-        limit_rsi_dip = 32   # Tylko okazje życia (poprzednio 55 - to był błąd)
-        min_vol_ratio = 1.2  # Tylko duży wolumen
-    
+        limit_rsi_dip = 32
+        min_vol_ratio = 1.2
     elif fng >= 60:
-        # GREED (Chciwość - Jak rynek ruszy): LUZUJEMY
         tryb = "AGRESYWNY (Hossa)"
-        limit_rsi_dip = 60   # Kupujemy trendy
-        min_vol_ratio = 0.8  # Akceptujemy mniejszy wolumen (bo wszystko rośnie)
+        limit_rsi_dip = 60
+        min_vol_ratio = 0.8
         
-    # Korekta dla strategii godzinowej (zawsze ostrożniej)
     if "godz" in typ:
         limit_rsi_dip -= 4
         min_vol_ratio += 0.3
 
-    powod_odrzucenia_btc = "Brak danych"
-
     for symbol, intervals in market_data.get("data", {}).items():
+        symbol_usdt = symbol + "USDT"
+        
+        # Sprawdzamy, czy AI już podjęło decyzję (TAK) dla tej pary
+        if (symbol, typ) in zablokowane_pary or (symbol_usdt, typ) in zablokowane_pary:
+            continue
+
         swiece = intervals.get(interwal, [])
         if not swiece or len(swiece) < 20: continue
         
@@ -90,35 +86,23 @@ def analiza_techniczna_zapasowa(typ, market_data):
         
         odrzut = ""
         
-        # LOGIKA FILTRACJI (Zależna od trybu)
         if vol_ratio < min_vol_ratio:
-            # W strachu wymagamy potwierdzenia wolumenem. W hossie mniej.
-            if not (rsi < 25): # Jak jest totalny krach, to bierzemy nawet bez wolumenu
-                odrzut = f"Słaby wolumen ({vol_ratio:.1f}x vs {min_vol_ratio}x)"
-
+            if not (rsi < 25): odrzut = f"Słaby wolumen ({vol_ratio:.1f}x vs {min_vol_ratio}x)"
         elif trend == "spadek" and rsi > limit_rsi_dip:
-             # To chroni przed łapaniem noży w połowie (SOL -5%)
-             odrzut = f"Spadek + RSI {rsi:.1f} za wysokie (Limit: {limit_rsi_dip})"
-
+             odrzut = f"Spadek + RSI {rsi:.1f} za wysokie"
         elif trend == "wzrost" and rsi >= 70:
-             # Nawet w hossie nie kupujemy szczytów
              odrzut = f"Wykupione ({rsi:.1f})"
 
-        # Info o BTC dla usera
-        if symbol == "BTC": powod_odrzucenia_btc = odrzut if odrzut else "Nieznany"
-        
-        if odrzut: continue
+        if odrzut:
+            print(f"   ➤ [ALGO][{typ}] 💤 Pas {symbol}: {odrzut}")
+            continue
 
-        # --- SUKCES - DODAJEMY ---
-        # SCENARIUSZ A: DIP (Kupno dołka)
         if rsi <= limit_rsi_dip:
             kandydaci.append({
                 "nazwa": f"{symbol}_SmartDip", "symbol": symbol, "typ": typ,
                 "warunek": f"DIP ({tryb}) RSI {rsi:.1f} + Vol {vol_ratio:.1f}x",
                 "oczekiwany_ruch": "wzrost", "pewnosc": "średnia"
             })
-        
-        # SCENARIUSZ B: TREND (Tylko w Hossie/Neutral)
         elif trend == "wzrost" and fng > 40 and rsi < 65:
             kandydaci.append({
                 "nazwa": f"{symbol}_TrendRide", "symbol": symbol, "typ": typ,
@@ -127,41 +111,90 @@ def analiza_techniczna_zapasowa(typ, market_data):
             })
 
     if kandydaci:
-        # W strachu BTC/ETH bezpieczniejsze
         if fng < 40:
             kandydaci.sort(key=lambda x: 3 if x['symbol'] == 'BTC' else (2 if x['symbol'] == 'ETH' else 1), reverse=True)
-        
         wybor = random.choice(kandydaci)
-        print(f"   ➤ [ALGO] 🎯 CEL ({tryb}): {wybor['symbol']} ({wybor['warunek']})")
+        print(f"   ➤ [ALGO][{typ}] 🎯 CEL ({tryb}): {wybor['symbol']} ({wybor['warunek']})")
         return [wybor]
     
-    # Logujemy powód odrzucenia BTC
-    if "tyg" not in typ:
-        print(f"   ➤ [ALGO] 💤 Pas ({tryb}). BTC: {powod_odrzucenia_btc}")
     return []
 
-def generuj_raport_4_slotowy(obraz, historia, sentyment):
+def generuj_raport_4_slotowy(obraz, historia, sentyment_str, sentyment_wartosc, dostepne_coiny):
+    # FIX: Dodałem argumenty sentyment_str i sentyment_wartosc, żeby prompt ich widział
+    lista_coinow_str = ", ".join(dostepne_coiny)
+
     prompt = f"""
-    Jesteś ZAWODOWYM TRADEREM.
-    Sytuacja rynkowa: {sentyment}.
+    Jesteś Senior Traderem AI z 20-letnim doświadczeniem w krypto.
+    Twoim celem jest ZYSKOWNY HANDEL SWINGOWY, a nie hazard.
     
-    ZADANIE: Decyzja TAK/NIE dla 4 interwałów (1H, 4H, 1D, 1W).
+    === SYTUACJA RYNKOWA ===
+    Globalny Sentyment: {sentyment_str} (Index: {sentyment_wartosc}/100)
     
-    ZASADY ADAPTACYJNE:
-    1. JEŚLI STRACH (Fear): Bądź bardzo ostrożny. Szukaj tylko głębokich dołków (RSI < 30) i dużego wolumenu.
-    2. JEŚLI CHCIWOŚĆ (Greed): Szukaj trendów wzrostowych i wybicia.
-    3. JEŚLI "NIE": Napisz krótko dlaczego (max 5 słów).
-    
-    DANE:
+    === TWOJA STRATEGIA (INTELIGENCJA) ===
+    1. FILTR BITCOINA (Najważniejsze):
+       - Jeśli BTC spada dynamicznie -> ODRZUCAJ WSZYSTKIE ALTCOINY (Risk Off).
+       - Jeśli BTC jest stabilny lub rośnie -> Szukaj okazji (Risk On).
+       
+    2. ANALIZA TECHNICZNA (Szukaj Konfluencji):
+       - RSI < 30 + Extreme Fear: To zazwyczaj okazja na "Odbicie Zdechłego Kota" lub odwrócenie. BIERZ, jeśli wolumen nie jest paniczny.
+       - RSI > 70 + Greed: Ryzyko korekty. Nie kupuj, chyba że to wybicie (Breakout) na ogromnym wolumenie.
+       - Volume Ratio: Jeśli < 0.5 -> Rynek martwy, unikaj. Jeśli > 2.0 -> Coś się dzieje (uwaga na pompy).
+       
+    3. KONSEKWENCJA:
+       - Nie "zgaduj". Jeśli nie ma czystego sygnału -> Decyzja: NIE.
+       - Lepiej stracić okazję niż stracić kapitał.
+
+    DANE DO ANALIZY (PRZEANALIZUJ KAŻDĄ PARĘ INDYWIDUALNIE):
     {obraz}
     
-    FORMAT JSON:
-    [
-      {{ "typ": "godzinowa", "decyzja": "TAK/NIE", "symbol": "...", "warunek": "...", "oczekiwany_ruch": "wzrost" }},
-      ...
-    ]
+    TWOJA DECYZJA (JSON):
+    {{
+        "SYMBOL": {{ 
+            "decyzja": "TAK" lub "NIE", 
+            "powod": "Opisz dlaczego, odnosząc się do BTC i struktury rynku (max 1 zdanie)" 
+        }},
+        ...
+    }}
     """
     return ask_ai(prompt)
+
+def wybierz_najlepsza_strategie(kandydaci, aktywne_pozycje):
+    if not kandydaci: return None
+
+    # 1. Zbieramy zajęte sloty
+    zajete_sloty = set()
+    for id_pozycji, p in aktywne_pozycje.items():
+        if "_" in id_pozycji:
+            zajete_sloty.add(id_pozycji)
+        else:
+            sym = p.get("symbol", "")
+            typ = p.get("typ", "STANDARD")
+            zajete_sloty.add(f"{sym}_{typ}")
+
+    # 2. Filtrujemy kandydatów
+    wolni_kandydaci = []
+    for k in kandydaci:
+        symbol = k["symbol"]
+        typ = k["typ"]
+        unikalne_id = f"{symbol}_{typ}"
+        
+        if unikalne_id in zajete_sloty:
+            print(f"   ⚠️ Pomijam {symbol} [{typ}] - ten slot jest zajęty.")
+            continue
+        wolni_kandydaci.append(k)
+
+    if not wolni_kandydaci:
+        return None
+
+    # 3. Sortowanie
+    priorytety = { "godzinowa": 1, "4-godzinna": 2, "jednodniowa": 3, "dzienna": 3, "tygodniowa": 4 }
+    
+    wolni_kandydaci.sort(key=lambda x: (
+        0 if x.get("pewnosc") == "wysoka" else 1, 
+        priorytety.get(x["typ"], 99)
+    ))
+
+    return wolni_kandydaci[0]
 
 def main():
     market = load_data(RYNEK_PATH)
@@ -171,7 +204,6 @@ def main():
     print(f"🧠 MÓZG BOTA: START ANALIZY ({datetime.now().strftime('%H:%M')})")
     print("="*50)
 
-    # --- SIESTA (Oszczędzanie limitu) ---
     godzina = datetime.now().hour
     tryb_tylko_algo = False
     
@@ -182,67 +214,100 @@ def main():
         print(f"☀️ TRYB DZIENNY. AI i Algorytm współpracują.")
 
     fng = market.get("sentiment", {})
-    sentyment_str = f"Sentyment: {fng.get('value')} ({fng.get('value_classification')})"
+    sentyment_val = fng.get('value', 50)
+    sentyment_klasa = fng.get('value_classification', 'Neutral')
+    sentyment_str = f"Sentyment: {sentyment_val} ({sentyment_klasa})"
     print(f"🎭 Rynek: {sentyment_str}")
     
     finalne_strategie = []
-    znalezione_typy = [] 
+    zablokowane_pary_tak = [] 
 
-    # --- KROK 1: AI ---
     if not tryb_tylko_algo:
         print("-" * 50)
         print(f"🤖 [1] KONSULTACJA AI (Gemini):")
         
         obraz_rynku = ""
+        dostepne_coiny = list(market["data"].keys())
+        
         for sym, intervals in market["data"].items():
             obraz_rynku += f"\nANALIZA {sym}:\n"
             obraz_rynku += analizuj_pelny_obraz(intervals)
 
         try:
-            resp = generuj_raport_4_slotowy(obraz_rynku, przygotuj_historie(), sentyment_str)
+            # FIX: Przekazujemy rozbite wartości sentymentu
+            resp = generuj_raport_4_slotowy(obraz_rynku, przygotuj_historie(), sentyment_klasa, sentyment_val, dostepne_coiny)
+            
             if resp:
                 raport, msg = extract_knowledge(resp)
                 if raport:
                     for pozycja in raport:
+                        if not isinstance(pozycja, dict): continue
+
                         typ = pozycja.get("typ", "nieznany")
                         decyzja = pozycja.get("decyzja", "NIE")
-                        sym = pozycja.get("symbol", "-")
+                        sym = pozycja.get("symbol", "NIEZNANY")
                         warunek = pozycja.get("warunek", "Brak powodu")
-                        
-                        if decyzja == "TAK" and sym != "-":
+
+                        sym_short = sym.replace("USDT", "")
+
+                        if decyzja == "TAK":
                             s = {
                                 "nazwa": f"{sym}_AI_{typ}", "symbol": sym, "typ": typ,
                                 "warunek": warunek, "oczekiwany_ruch": "wzrost", 
                                 "pewnosc": "wysoka", "zrodlo": "AI"
                             }
                             finalne_strategie.append(s)
-                            znalezione_typy.append(typ)
                             print(f"   ✅ TAK [{typ}]: {sym} -> {warunek}")
+                            
+                            zablokowane_pary_tak.append((sym, typ))
+                            zablokowane_pary_tak.append((sym_short, typ))
                         else:
-                            print(f"   ❌ NIE [{typ}]: {warunek}")
-        except Exception as e:
-            print(f"   ⚠️ Błąd AI: {e}")
+                            # Opcjonalnie można odkomentować
+                            # print(f"   ❌ NIE [{typ}]: {sym} -> {warunek}")
+                            pass
+                else:
+                    print(f"   ⚠️ Błąd parsowania odpowiedzi AI: {msg}")
 
-    # --- KROK 2: ALGORYTM (ADAPTACYJNY) ---
+        except Exception as e:
+            print(f"   ⚠️ Błąd AI (Critical): {e}")
+
     print("-" * 50)
     print(f"🛡️ [2] WERYFIKACJA MATEMATYCZNA (Snajper):")
     
-    typy_do_sprawdzenia = ["godzinowa", "4-godzinna", "jednodniowa", "tygodniowa"]
-    if not tryb_tylko_algo:
-        typy_do_sprawdzenia = [t for t in typy_do_sprawdzenia if t not in znalezione_typy]
+    typy_wszystkie = ["godzinowa", "4-godzinna", "jednodniowa", "tygodniowa"]
 
-    for typ in typy_do_sprawdzenia:
-        awaryjne = analiza_techniczna_zapasowa(typ, market)
+    for typ in typy_wszystkie:
+        awaryjne = analiza_techniczna_zapasowa(typ, market, zablokowane_pary_tak)
         if awaryjne:
-            awaryjne[0]['zrodlo'] = f"Algorytm ({market.get('sentiment', {}).get('value_classification', 'Auto')})"
+            awaryjne[0]['zrodlo'] = f"Algorytm ({sentyment_klasa})"
             finalne_strategie.extend(awaryjne)
 
     print("=" * 50)
     if finalne_strategie:
-        print(f"🚀 SUKCES! Znaleziono {len(finalne_strategie)} strategii.")
+        print(f"🚀 SUKCES! Znaleziono {len(finalne_strategie)} kandydatów.")
         save_strategies(finalne_strategie)
+        
+        aktywne = wczytaj_strategie_bota()
+        wybrana = wybierz_najlepsza_strategie(finalne_strategie, aktywne)
+        
+        if wybrana:
+            decyzja_dla_schedulera = {
+                "akcja": "KUP", 
+                "symbol": wybrana["symbol"],
+                "typ_strategii": wybrana["typ"],
+                "zrodlo": wybrana.get("zrodlo", "Algorytm"),
+                "uzasadnienie": wybrana["warunek"],
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+            save_brain(decyzja_dla_schedulera)
+            print(f"🧠 [CONNECT] Wybrano do realizacji: {wybrana['symbol']} [{wybrana['typ']}]")
+        else:
+            print("🧠 [CONNECT] Brak nowych unikalnych strategii (wszystkie sloty zajęte).")
+            save_brain({"akcja": "CZEKAJ", "powod": "Dublowanie strategii"})
+
     else:
         print("💤 PUSTO. Cierpliwość to klucz.")
+        save_brain({"akcja": "CZEKAJ", "powod": "Brak strategii"})
         try:
             with open(STRATEGIE_TEMP_PATH, "w", encoding="utf-8") as f: json.dump([], f)
         except: pass

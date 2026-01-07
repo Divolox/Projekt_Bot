@@ -1,248 +1,299 @@
 import json
 import time
 import os
-import datetime
-import portfel_manager as pm
+import sys
+from datetime import datetime
 
-# ==========================================
-# ⚙️ KONFIGURACJA
-# ==========================================
-PLIK_STRATEGII = "strategie_bota.json"
+# ============================================================
+# 🛡️ BOT EVALUATOR (WERSJA OSTATECZNA - FIX CENY)
+# ============================================================
+# - ZACHOWANA LOGIKA "3 ŚWIATÓW" (OSOBNE BLOKI KODU)
+# - NAPRAWIONE POBIERANIE CENY (Obsługa BTC i BTCUSDT)
+# - SZTYWNE CZASY (60 min, 240 min, 1500 min)
+# ============================================================
+
+PLIK_PORTFELA = "portfel.json"
 PLIK_RYNKU = "rynek.json"
 
-# --- ZASADY WYJŚCIA (GLOBALNE) ---
-HARD_STOP_LOSS = -2.5         
-HARD_TAKE_PROFIT = 25.0       
-TRAILING_START_MIN = 1.5      
-TRAILING_DROP_SMALL = 0.5     
-TRAILING_START_BIG = 5.0      
-TRAILING_DROP_BIG = 1.5       
+# Sztywne limity czasowe (zgodnie z życzeniem)
+LIMITS = {
+    "godzinowa": 60,       # 1h
+    "4-godzinna": 240,     # 4h
+    "jednodniowa": 1500,   # 25h (24h + 1h zapasu na zamknięcie świecy)
+    "tygodniowa": 10080,   # 7 dni
+    "moonshot": 60,        # 1h (krótka pompa)
+    "default": 120
+}
 
 def wczytaj_json(plik):
+    """Bezpieczny odczyt"""
     if not os.path.exists(plik): return {}
     try:
-        with open(plik, "r") as f: return json.load(f)
-    except: return {}
+        with open(plik, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        return {}
 
 def zapisz_json(plik, dane):
+    """Bezpieczny zapis"""
     try:
-        with open(plik, "w") as f: json.dump(dane, f, indent=4)
-    except: pass
+        with open(plik, 'w', encoding='utf-8') as f:
+            json.dump(dane, f, indent=4)
+    except Exception as e:
+        pass
 
-# =========================================================
-# 🧠 MÓZG SZCZEGÓŁOWY (3 ŚWIATY + WOLUMEN + RSI)
-# To jest Twoja funkcja z "3 Światami" (bez Trailingu/Czasu)
-# =========================================================
-def ocen_pozycje(pozycja, aktualna_cena, aktualne_rsi, vol_ratio):
-    symbol = pozycja.get('symbol')
-    typ = str(pozycja.get('typ', 'STANDARD')).lower()
+def format_czas(minuty):
+    """Formatowanie czasu dla logów"""
+    if minuty < 60: return f"{int(minuty)}m"
+    return f"{int(minuty//60)}h {int(minuty%60)}m"
+
+def pobierz_cene(rynek, symbol):
+    """
+    FIX: Funkcja pobierająca cenę, która sprawdza warianty z USDT i bez.
+    Rozwiązuje problem 'Brak ceny dla BTC' gdy w rynku jest 'BTCUSDT'.
+    """
+    # Lista wariantów do sprawdzenia
+    warianty = [symbol, symbol.replace("USDT", ""), symbol + "USDT"]
     
-    c_start = float(pozycja.get('cena_wejscia') or pozycja.get('cena_start') or 0)
-    if c_start == 0: return False, ""
+    # 1. Sprawdź format z BotObserwatora (lista 'prices')
+    if "prices" in rynek and isinstance(rynek["prices"], list):
+        for p in rynek["prices"]:
+            # Sprawdzamy czy symbol z rynku pasuje do któregokolwiek wariantu
+            if p.get("symbol") in warianty:
+                return float(p.get("current_price", 0))
 
-    wynik_proc = ((aktualna_cena - c_start) / c_start) * 100
-    
-    # 🌍 1. TYGODNIOWA (Inwestor)
-    if "tyg" in typ:
-        if wynik_proc <= -12.0: return True, f"🛑 HARD SL 1W ({wynik_proc:.2f}%)"
-        if wynik_proc < -5.0 and vol_ratio > 2.0: return True, f"📉 PANIC SELL 1W (Krach Vol)"
-        if wynik_proc > 15.0 and aktualne_rsi > 80: return True, f"💰 SMART TP 1W (RSI {aktualne_rsi:.0f})"
-        if wynik_proc >= 30.0: return True, f"🚀 MOON TP 1W ({wynik_proc:.2f}%)"
-        return False, "TRZYMAM"
+    # 2. Sprawdź format standardowy (słownik 'data')
+    if "data" in rynek:
+        for wariant in warianty:
+            if wariant in rynek["data"]:
+                val = rynek["data"][wariant]
+                return float(val.get("lastPrice", 0)) if isinstance(val, dict) else float(val)
+            
+    return 0.0
 
-    # 🌍 2. GODZINOWA (Skalper)
-    elif "godz" in typ:
-        if wynik_proc <= -2.5: return True, f"🛑 HARD SL 1H ({wynik_proc:.2f}%)"
-        if wynik_proc < -1.0 and vol_ratio > 1.5: return True, f"📉 VOLUME DUMP 1H"
-        if wynik_proc < -1.2 and aktualne_rsi > 45: return True, f"📉 SMART CUT 1H (Słabe RSI)"
-        if wynik_proc > 1.5 and vol_ratio < 0.6: return True, f"💰 FAKE PUMP TP (Brak Vol)"
-        if wynik_proc > 1.5 and aktualne_rsi > 72: return True, f"💰 RSI TP 1H"
-        return False, "TRZYMAM"
-
-    # 🌍 3. SWING (4H / 1D)
-    else:
-        limit_sl = -4.0 if "4h" in typ else -8.0
-        if wynik_proc <= limit_sl: return True, f"🛑 HARD SL ({wynik_proc:.2f}%)"
-        if wynik_proc < -2.0 and vol_ratio > 1.8: return True, f"📉 VOLUME DUMP"
-        if wynik_proc < -2.0 and aktualne_rsi > 42: return True, f"📉 SMART CUT"
-        if wynik_proc > 4.0 and aktualne_rsi > 75: return True, f"💰 SMART TP"
-        if wynik_proc >= 10.0: return True, f"🚀 HARD TP ({wynik_proc:.2f}%)"
-        return False, "TRZYMAM"
-
-# =========================================================
-# 🔧 SILNIK GŁÓWNY (PĘTLA Z PEŁNĄ LOGIKĄ)
-# =========================================================
 def main():
-    print(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] 🛡️ EVALUATOR: Weryfikacja (Original Full)...")
-
-    raw_strategies = wczytaj_json(PLIK_STRATEGII)
-    raw_market = wczytaj_json(PLIK_RYNKU)
-
-    # Konwersja Strategii
-    baza_pozycji = {}
-    if isinstance(raw_strategies, list):
-        for item in raw_strategies:
-            klucz = item.get("nazwa") or f"{item.get('symbol')}_{int(time.time())}"
-            baza_pozycji[klucz] = item
-    elif isinstance(raw_strategies, dict):
-        baza_pozycji = raw_strategies
-
-    # Konwersja Rynku
-    rynek = {}
-    if isinstance(raw_market, list):
-        for item in raw_market:
-            sym = item.get("symbol") or item.get("coin")
-            if sym: rynek[sym] = item
-    elif isinstance(raw_market, dict):
-        if "data" in raw_market: rynek = raw_market["data"]
-        elif "prices" in raw_market: 
-             for p in raw_market["prices"]:
-                 rynek[p["symbol"]] = {"price": p["current_price"]}
-
-    if not baza_pozycji:
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🛡️ EVALUATOR: Weryfikacja (Smart Price Match)...")
+    
+    portfel = wczytaj_json(PLIK_PORTFELA)
+    rynek = wczytaj_json(PLIK_RYNKU)
+    
+    if "pozycje" not in portfel or not portfel["pozycje"]:
         print("   (Brak aktywnych pozycji)")
         return
 
-    teraz = time.time()
-    keys = list(baza_pozycji.keys())
-    
-    for klucz in keys:
-        pozycja = baza_pozycji[klucz]
-        if pozycja.get("status") not in ["OTWARTA", "aktywna"]: continue
-        
-        symbol = pozycja.get("symbol")
-        typ = str(pozycja.get('typ', 'STANDARD')).lower()
-        sym_short = symbol.replace("USDT", "")
+    try:
+        import portfel_manager as pm
+    except ImportError:
+        print("   ⚠️ KRYTYCZNY BŁĄD: Brak modułu portfel_manager!")
+        return
 
-        # --- DANE ---
-        cena_akt = 0.0
-        rsi_akt = 50.0
-        vol_ratio = 1.0
+    # Iteracja po kopi słownika
+    lista_pozycji = list(portfel["pozycje"].items())
 
-        dane_coin = rynek.get(symbol) or rynek.get(sym_short) or {}
+    for symbol, poz in lista_pozycji:
+        try:
+            # 1. POMIJANIE SKANERA (On ma własną logikę w skaner_momentum.py)
+            if poz.get("zrodlo") == "SKANER":
+                continue
 
-        # Pobieranie Ceny/RSI/Vol
-        if "price" in dane_coin: cena_akt = float(dane_coin["price"])
-        elif "lastPrice" in dane_coin: cena_akt = float(dane_coin["lastPrice"])
-        elif "current_price" in dane_coin: cena_akt = float(dane_coin["current_price"])
-        elif "1h" in dane_coin and dane_coin["1h"]: cena_akt = float(dane_coin["1h"][-1]["c"])
-        
-        if "rsi" in dane_coin: rsi_akt = float(dane_coin["rsi"])
-        if "volume_ratio" in dane_coin: vol_ratio = float(dane_coin["volume_ratio"])
-        elif "vol_ratio" in dane_coin: vol_ratio = float(dane_coin["vol_ratio"])
-
-        if cena_akt == 0 and "prices" in raw_market:
-             for p in raw_market["prices"]:
-                 if p.get("symbol") == symbol:
-                     cena_akt = float(p.get("current_price", 0))
-                     break
-
-        if cena_akt <= 0:
-            print(f"   ⚠️ {symbol}: Brak ceny.")
-            continue
-
-        c_start = float(pozycja.get('cena_wejscia') or pozycja.get('cena_start') or 0)
-        c_time = float(pozycja.get('czas_wejscia') or pozycja.get('czas_start_ts') or 0)
-        
-        if c_start == 0: continue
-        
-        # Obliczenia
-        wynik = ((cena_akt - c_start) / c_start) * 100
-        czas_min = (teraz - c_time) / 60
-        
-        # Update Max Zysk
-        max_zysk = float(pozycja.get('max_zysk', 0.0))
-        zmieniono_max = False
-        if wynik > max_zysk:
-            max_zysk = wynik
-            pozycja['max_zysk'] = max_zysk
-            zmieniono_max = True
-
-        kolor = "🟢" if wynik > 0 else "🔴"
-        print(f"   📊 {symbol:<6} [{typ:<4}] | {kolor} {wynik:>+6.2f}% (Max:{max_zysk:.1f}%) | RSI:{rsi_akt:.0f} Vol:{vol_ratio:.1f}x")
-
-        # ==============================
-        # ⚔️ GŁÓWNA LOGIKA DECYZYJNA
-        # ==============================
-        akcja = None
-        powod = ""
-        ikona_akcji = "❓"
-
-        # Limity Czasowe
-        limit_czasu = 65 
-        grace_time = 30
-        if "4h" in typ: limit_czasu = 245; grace_time = 60
-        elif "1d" in typ: limit_czasu = 1450; grace_time = 120
-        elif "tyg" in typ: limit_czasu = 10090; grace_time = 360
-
-        # 1. TIMEOUT (PRIORYTET)
-        if czas_min >= limit_czasu:
-            # Wyjątek Grace Period (Mała strata + Niskie RSI)
-            if -1.5 < wynik < 0 and rsi_akt < 30 and czas_min < (limit_czasu + grace_time):
-                pass 
-            else:
-                akcja = "KONIEC CZASU"
-                powod = f"Minęło {limit_czasu}m (Limit)"
-                ikona_akcji = "⌛"
-
-        # 2. HARD STOP LOSS (Globalny)
-        elif wynik <= HARD_STOP_LOSS:
-            # Safety check: Dead Cat Bounce (RSI < 20)
-            if rsi_akt < 20 and wynik > (HARD_STOP_LOSS - 2.0):
-                pass # Czekamy
-            else:
-                akcja = "HARD STOP LOSS"
-                powod = f"Globalna Ochrona {HARD_STOP_LOSS}%"
-                ikona_akcji = "💀"
-
-        # 3. MOONSHOT TP (Globalny)
-        elif wynik >= HARD_TAKE_PROFIT:
-            akcja = "MOONSHOT TP"
-            powod = f"Target {wynik:.2f}%"
-            ikona_akcji = "🚀"
-
-        # 4. SMART TRAILING (Globalny)
-        elif max_zysk >= TRAILING_START_BIG and wynik < (max_zysk - TRAILING_DROP_BIG):
-            akcja = "SMART TRAILING (BIG)"
-            powod = "Korekta ze szczytu"
-            ikona_akcji = "💰"
-        elif max_zysk >= TRAILING_START_MIN and wynik < (max_zysk - TRAILING_DROP_SMALL):
-            akcja = "SMART TRAILING (SMALL)"
-            powod = "Szybka realizacja"
-            ikona_akcji = "🛡️"
-
-        # 5. LOGIKA "3 ŚWIATÓW" (Specyficzna)
-        # Jeśli globalne zasady nie zadziałały, pytamy "Mózg Szczegółowy"
-        if not akcja:
-            czy_zamknac, powod_szczegolowy = ocen_pozycje(pozycja, cena_akt, rsi_akt, vol_ratio)
-            if czy_zamknac:
-                akcja = "ANALIZA RYNKU"
-                powod = powod_szczegolowy
-                ikona_akcji = "📉" if "SL" in powod or "CUT" in powod else "💰"
-
-        # --- EGZEKUCJA ---
-        if akcja:
-            zysk_usdt = pm.zwroc_srodki(symbol, cena_akt)
-            kolor_kasy = "🟢" if zysk_usdt > 0 else "🔴"
-
-            print("\n" + "="*50)
-            print(f"🔔 GŁÓWNY BOT: ZAMYKAM {symbol} [{typ}]")
-            print(f"   📉 Akcja:        {akcja}")
-            print(f"   ⏱️ Czas trwania: {czas_min:.0f} min")
-            print(f"   💵 Cena wejścia: {c_start:.4f}")
-            print(f"   💵 Cena wyjścia: {cena_akt:.4f}")
-            print(f"   💰 WYNIK:        {ikona_akcji} {wynik:+.2f}% (Max: {max_zysk:+.2f}%)")
-            print(f"   📝 Powód:        {powod}")
-            print(f"   🏦 PORTFEL:      {kolor_kasy} {zysk_usdt:+.2f} USDT")
-            print("="*50 + "\n")
+            typ_strat = poz.get("typ_strategii", "nieznany")
             
-            # NATYCHMIASTOWE USUNIĘCIE I ZAPIS
-            del baza_pozycji[klucz]
-            zapisz_json(PLIK_STRATEGII, baza_pozycji)
-            print("   💾 Baza zaktualizowana natychmiast.")
-        
-        elif zmieniono_max:
-             zapisz_json(PLIK_STRATEGII, baza_pozycji)
+            # 2. POBIERANIE CENY (Z UŻYCIEM NOWEGO FIXA)
+            cena_akt = pobierz_cene(rynek, symbol)
+            
+            if cena_akt == 0:
+                print(f"   ⚠️ Brak ceny dla {symbol} (Sprawdź rynek.json)")
+                continue
+
+            # 3. OBLICZENIA WYNIKÓW
+            cena_wej = float(poz["cena_wejscia"])
+            # Fix dla ilości (obsługa starego i nowego klucza)
+            ilosc = float(poz.get("ilosc", 0))
+            if ilosc == 0: ilosc = float(poz.get("ilosc_coinow", 0))
+
+            wynik_proc = ((cena_akt - cena_wej) / cena_wej) * 100
+            
+            czas_wejscia = poz.get("czas_zakupu", time.time())
+            czas_trwania_min = (time.time() - czas_wejscia) / 60
+            
+            # Aktualizacja Max Zysku (dla Trailing Stopa)
+            max_zysk = poz.get("max_zysk", 0.0)
+            if wynik_proc > max_zysk:
+                max_zysk = wynik_proc
+                portfel["pozycje"][symbol]["max_zysk"] = max_zysk
+                zapisz_json(PLIK_PORTFELA, portfel)
+
+            # Ustalenie limitu wyświetlania
+            limit_display = LIMITS["default"]
+            if "jednodniowa" in typ_strat: limit_display = LIMITS["jednodniowa"]
+            elif "tygodniowa" in typ_strat: limit_display = LIMITS["tygodniowa"]
+            elif "4-godz" in typ_strat: limit_display = LIMITS["4-godzinna"]
+            elif "godz" in typ_strat: limit_display = LIMITS["godzinowa"]
+            elif "moonshot" in typ_strat: limit_display = LIMITS["moonshot"]
+
+            # Logowanie stanu
+            print(f"   📊 {symbol:<6} [{typ_strat}] | {'🟢' if wynik_proc > 0 else '🔴'} {wynik_proc:+.2f}% (Max:{max_zysk:.1f}%) | Czas: {format_czas(czas_trwania_min)}/{format_czas(limit_display)}")
+
+            # =========================================================
+            # 4. LOGIKA DECYZYJNA (3 ODDZIELNE ŚWIATY)
+            # =========================================================
+            
+            decyzja_zamkniecia = False
+            powod = ""
+
+            # ---------------------------------------------------------
+            # ŚWIAT 1: GODZINOWA (Szybki Skalp)
+            # ---------------------------------------------------------
+            if "godzinowa" in typ_strat:
+                # Zasada 1: Take Profit (+1.5%)
+                if wynik_proc >= 1.5:
+                    decyzja_zamkniecia = True
+                    powod = f"Take Profit (+{wynik_proc:.2f}%)"
+                
+                # Zasada 2: Stop Loss (-1.5%)
+                elif wynik_proc <= -1.5:
+                    decyzja_zamkniecia = True
+                    powod = f"Stop Loss (-1.5%)"
+                
+                # Zasada 3: Koniec Czasu (60 min)
+                elif czas_trwania_min >= LIMITS["godzinowa"]:
+                    decyzja_zamkniecia = True
+                    powod = f"Koniec Czasu (Limit 1h)"
+                
+                # Zasada 4: Break Even (Ochrona kapitału)
+                elif max_zysk >= 0.8 and wynik_proc <= 0.1:
+                    decyzja_zamkniecia = True
+                    powod = "Break Even (Ochrona Kapitału)"
+
+            # ---------------------------------------------------------
+            # ŚWIAT 2: 4-GODZINNA (Swing Trading)
+            # ---------------------------------------------------------
+            elif "4-godz" in typ_strat:
+                # Zasada 1: Take Profit (+4.0%)
+                if wynik_proc >= 4.0:
+                    decyzja_zamkniecia = True
+                    powod = f"Take Profit (+{wynik_proc:.2f}%)"
+                
+                # Zasada 2: Stop Loss (-3.0%)
+                elif wynik_proc <= -3.0:
+                    decyzja_zamkniecia = True
+                    powod = f"Stop Loss (-3.0%)"
+                
+                # Zasada 3: Trailing Stop (Ruchomy SL)
+                # Jeśli zysk > 2.5%, podciągnij SL
+                elif max_zysk >= 2.5 and wynik_proc < (max_zysk - 1.0):
+                    decyzja_zamkniecia = True
+                    powod = f"Trailing Stop (Zjazd z {max_zysk:.1f}%)"
+                
+                # Zasada 4: Break Even
+                elif max_zysk >= 1.5 and wynik_proc <= 0.2:
+                    decyzja_zamkniecia = True
+                    powod = "Break Even (Ochrona Zysku)"
+                
+                # Zasada 5: Czas (4h)
+                elif czas_trwania_min >= LIMITS["4-godzinna"]:
+                    decyzja_zamkniecia = True
+                    powod = f"Koniec Czasu (Limit 4h)"
+
+            # ---------------------------------------------------------
+            # ŚWIAT 3: JEDNODNIOWA (Inwestycja)
+            # ---------------------------------------------------------
+            elif "jednodniowa" in typ_strat:
+                # Zasada 1: Take Profit (+8.0%)
+                if wynik_proc >= 8.0:
+                    decyzja_zamkniecia = True
+                    powod = f"Take Profit (+{wynik_proc:.2f}%)"
+                
+                # Zasada 2: Stop Loss (-5.0%)
+                elif wynik_proc <= -5.0:
+                    decyzja_zamkniecia = True
+                    powod = f"Stop Loss (-5.0%)"
+                
+                # Zasada 3: Trailing Stop (Luźny)
+                elif max_zysk >= 5.0 and wynik_proc < (max_zysk - 2.0):
+                    decyzja_zamkniecia = True
+                    powod = f"Trailing Stop (Daily)"
+                
+                # Zasada 4: Break Even
+                elif max_zysk >= 3.0 and wynik_proc <= 0.5:
+                    decyzja_zamkniecia = True
+                    powod = "Break Even (Daily)"
+                
+                # Zasada 5: Czas (25h)
+                elif czas_trwania_min >= LIMITS["jednodniowa"]:
+                    decyzja_zamkniecia = True
+                    powod = f"Koniec Czasu (Limit 25h)"
+
+            # ---------------------------------------------------------
+            # 4. TYGODNIOWA (Long Term) - ULEPSZONA WERSJA
+            # ---------------------------------------------------------
+            elif "tygodniowa" in typ_strat:
+                # 1. Take Profit (Celujemy wysoko, ale bez przesady)
+                if wynik_proc >= 20.0: 
+                    decyzja = True; powod = f"Take Profit (+{wynik_proc:.2f}%)"
+                
+                # 2. Stop Loss (Twardy, dla bezpieczeństwa)
+                elif wynik_proc <= -8.0: 
+                    decyzja = True; powod = f"Stop Loss (-8.0%)"
+                
+                # 3. Break Even (Ochrona kapitału)
+                # Jak zarobimy +4%, podciągamy SL na +0.5% (żeby wyjść na zero z opłatami)
+                elif max_zysk >= 4.0 and wynik_proc <= 0.5:
+                    decyzja = True; powod = "Break Even (Weekly)"
+
+                # 4. Trailing Stop (Inteligentny)
+                # Jak zarobimy ponad +12%, pozwalamy cenie cofnąć się o max 4%
+                # Daje to szansę na przetrwanie korekty, ale chroni duży zysk
+                elif max_zysk >= 12.0 and wynik_proc < (max_zysk - 4.0):
+                    decyzja = True; powod = f"Trailing Stop (Zjazd z {max_zysk:.1f}%)"
+                
+                # 5. Czas
+                elif czas_trwania_min >= LIMITS["tygodniowa"]: 
+                    decyzja = True; powod = "Koniec Czasu (7 dni)"
+
+            # ---------------------------------------------------------
+            # ŚWIAT 5: MOONSHOT (Pompa)
+            # ---------------------------------------------------------
+            elif "moonshot" in typ_strat:
+                if max_zysk >= 10.0 and wynik_proc < (max_zysk - 3.0):
+                    decyzja_zamkniecia = True; powod = "Trailing Moonshot"
+                elif wynik_proc <= -4.0:
+                    decyzja_zamkniecia = True; powod = "Stop Loss Moonshot"
+                elif czas_trwania_min >= LIMITS["moonshot"]:
+                    decyzja_zamkniecia = True; powod = "Koniec Czasu Moonshot"
+            
+            # Default fallback
+            else:
+                if wynik_proc >= 2.5: decyzja_zamkniecia = True; powod = "TP Default"
+                elif wynik_proc <= -2.0: decyzja_zamkniecia = True; powod = "SL Default"
+                elif czas_trwania_min >= 120: decyzja_zamkniecia = True; powod = "Timeout Default"
+
+            # =========================================================
+            # 6. EGZEKUCJA SPRZEDAŻY
+            # =========================================================
+            if decyzja_zamkniecia:
+                print("="*50)
+                print(f"   🔔 GŁÓWNY BOT: ZAMYKAM {symbol} [{typ_strat}]")
+                
+                akcja_str = "KONIEC CZASU" if "Koniec" in powod or "Limit" in powod else powod
+                
+                print(f"   📉 Akcja:        {akcja_str}")
+                print(f"   ⏱️ Czas trwania: {format_czas(czas_trwania_min)}")
+                print(f"   💵 Cena wejścia: {cena_wej:.4f}")
+                print(f"   💵 Cena wyjścia: {cena_akt:.4f}")
+                
+                # Wywołanie managera
+                zysk_usdt = pm.zwroc_srodki(symbol, cena_akt, zrodlo="MAIN_BOT")
+                
+                print(f"   💰 WYNIK:        ⌛ {wynik_proc:+.2f}% (Max: {max_zysk:.2f}%)")
+                print(f"   📝 Powód:        {powod}")
+                print(f"   🏦 PORTFEL:      {'🟢' if zysk_usdt > 0 else '🔴'} {zysk_usdt:+.2f} USDT")
+                print("="*50)
+                print("                                                         💾 Baza zaktualizowana natychmiast.")
+
+        except Exception as e:
+            # print(f"Błąd pozycji {symbol}: {e}") # Wyciszamy błędy pojedyncze
+            continue
 
 if __name__ == "__main__":
     main()

@@ -1,8 +1,4 @@
 {
-  "akcja": "KUP",
-  "symbol": "BTCUSDT",
-  "typ_strategii": "jednodniowa",
-  "zrodlo": "AI",
-  "uzasadnienie": "Zdrowy trend wzrostowy 1D (RSI 40.8) z normalnym wolumenem. Sentyment Extreme Fear (23) wspiera akumulacj\u0119.",
-  "timestamp": "2025-12-30T22:25:24.526082+00:00"
+  "akcja": "CZEKAJ",
+  "powod": "Brak strategii"
 }

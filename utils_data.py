@@ -61,3 +61,37 @@ def analizuj_pelny_obraz(symbol_data):
         
         raport += f"   - {interval}: Trend {trend}, RSI={rsi} {stan}, Wolumen: {vol_info}\n"
     return raport
+
+# --- [DODANE] BRAKUJĄCE FUNKCJE DLA ANALITYKA ---
+
+def extract_ohlc(market_data, symbol):
+    """Wyciąga świece 1D dla symbolu z formatu rynek.json"""
+    # Obsługa formatu 'data': {'BTC': {'1d': [...]}}
+    short_sym = symbol.replace("USDT", "")
+    if "data" in market_data:
+        if short_sym in market_data["data"]:
+            return market_data["data"][short_sym].get("1d", [])
+        if symbol in market_data["data"]:
+            return market_data["data"][symbol].get("1d", [])
+    return []
+
+def analizuj_swiece(ohlc_data):
+    """Generuje prosty opis tekstowy ostatnich 5 świec"""
+    if not ohlc_data or len(ohlc_data) < 5:
+        return "Brak wystarczających danych świecowych."
+    
+    opis = ""
+    last_5 = ohlc_data[-5:]
+    for i, c in enumerate(last_5):
+        zmiana = ((c['c'] - c['h']) / c['h']) * 100 # To uproszczenie, lepiej (close-open)/open
+        # Zakładając że nie mamy open, szacujemy po close vs prev_close
+        if i > 0:
+            prev = last_5[i-1]['c']
+            zmiana = ((c['c'] - prev) / prev) * 100
+        else:
+            zmiana = 0.0
+            
+        ikona = "🟢" if zmiana > 0 else "🔴"
+        opis += f"Dzień {i+1}: {ikona} {zmiana:.2f}% (Vol: {int(c['v'])})\n"
+        
+    return opis

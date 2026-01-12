@@ -4,116 +4,151 @@ import time
 import sys
 
 # ==========================================
-# 💰 PORTFEL MANAGER (WERSJA ORYGINALNA + FIXY)
+# 💰 PORTFEL MANAGER (WERSJA SQLITE - FINAL)
 # ==========================================
 
-PLIK_PORTFELA = "portfel.json"
-PLIK_RYNKU = "rynek.json"
+# Dodajemy ścieżkę do modułów
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.append(current_dir)
 
-# Automatyczne szukanie pliku (żeby Skaner nie tworzył duplikatów)
-if not os.path.exists(PLIK_PORTFELA) and os.path.exists(os.path.join("..", PLIK_PORTFELA)):
-    PLIK_PORTFELA = os.path.join("..", PLIK_PORTFELA)
+# Importujemy naszą nową bazę
+try:
+    from database_handler import DatabaseHandler
+    db = DatabaseHandler() # Połączenie z bazą
+    print("✅ Portfel połączony z bazą SQLite.")
+except ImportError:
+    print("❌ BŁĄD KRYTYCZNY: Brak pliku database_handler.py!")
+    sys.exit()
+
+# --- MIGRACJA STARYCH DANYCH (Tylko raz) ---
+# Przepisuje saldo z portfel.json do bazy przy pierwszym starcie
+def migruj_z_jsona():
+    plik_json = "portfel.json"
+    if os.path.exists(plik_json):
+        try:
+            with open(plik_json, 'r') as f:
+                dane = json.load(f)
+                stare_saldo = float(dane.get("saldo_gotowka", 1000.0))
+                
+                # Sprawdzamy obecne saldo w bazie
+                obecne_db = db.pobierz_saldo()[0]
+                
+                # Jeśli w bazie jest domyślne 1000, a w jsonie inne, to nadpisujemy
+                if obecne_db == 1000.0 and stare_saldo != 1000.0:
+                    roznica = stare_saldo - 1000.0
+                    db.aktualizuj_saldo(roznica)
+                    print(f"🔄 Zmigrowano saldo z JSON do SQL: {stare_saldo} USDT")
+        except: pass
+
+migruj_z_jsona()
+# -------------------------------------------
+
+PLIK_RYNKU = "rynek.json"
+# Obsługa ścieżki (czy jesteśmy w folderze skanera czy głównym)
+if not os.path.exists(PLIK_RYNKU) and os.path.exists(os.path.join("..", PLIK_RYNKU)):
     PLIK_RYNKU = os.path.join("..", PLIK_RYNKU)
 
-# --- [DODANE 1] Import funkcji do czyszczenia pamięci mózgu ---
-try:
-    # Dodajemy bieżący folder do ścieżki, żeby znaleźć data_storage
-    sys.path.append(os.path.dirname(os.path.abspath(__file__))) 
-    from data_storage import aktualizuj_status_strategii
-except ImportError:
-    # Zabezpieczenie, żeby się nie wywalił, jak nie znajdzie pliku
-    def aktualizuj_status_strategii(symbol, status, wynik): pass
-# -------------------------------------------------------------
-
-def wczytaj_portfel():
-    """Tę funkcję woła Twój Skaner. Musi tu być."""
-    if not os.path.exists(PLIK_PORTFELA):
-        dane = {
-            "saldo_gotowka": 1000.0, 
-            "pozycje": {},
-            "historia": []
-        }
-        zapisz_portfel(dane)
-        return dane
-    try:
-        with open(PLIK_PORTFELA, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except:
-        return {"saldo_gotowka": 1000.0, "pozycje": {}}
-
-def zapisz_portfel(dane):
-    """Tę funkcję woła Twój Skaner. Musi tu być."""
-    try:
-        with open(PLIK_PORTFELA, 'w', encoding='utf-8') as f:
-            json.dump(dane, f, indent=4)
-    except Exception as e:
-        print(f"⚠️ Błąd zapisu: {e}")
 
 def pobierz_cene_aktualna(symbol):
-    """Pomocnicza funkcja do liczenia wartości portfela"""
+    # Ceny nadal bierzemy z JSONa (bo BotObserwator tam zrzuca dane z giełdy)
     if not os.path.exists(PLIK_RYNKU): return 0.0
     try:
         with open(PLIK_RYNKU, 'r', encoding='utf-8') as f:
             rynek = json.load(f)
             
-        # 1. Format listy (BotObserwator)
         if "prices" in rynek and isinstance(rynek["prices"], list):
             for p in rynek["prices"]:
                 if p.get("symbol") == symbol: return float(p.get("current_price", 0))
         
-        # 2. Format słownika (Stary)
         if "data" in rynek:
+            symbol_short = symbol.replace("USDT", "")
             if symbol in rynek["data"]:
                 val = rynek["data"][symbol]
                 return float(val.get("lastPrice", 0)) if isinstance(val, dict) else float(val)
-            short = symbol.replace("USDT", "")
-            if short in rynek["data"]:
-                val = rynek["data"][short]
+            if symbol_short in rynek["data"]:
+                val = rynek["data"][symbol_short]
                 return float(val.get("lastPrice", 0)) if isinstance(val, dict) else float(val)
     except: pass
     return 0.0
 
 def oblicz_wartosc_total():
-    """
-    To naprawia błąd wyświetlania salda.
-    Sumuje: Gotówka + Wartość Coinów
-    """
-    portfel = wczytaj_portfel()
+    # 1. Gotówka z bazy
+    saldo_gotowka = db.pobierz_saldo()[0]
     
-    # Pobierz gotówkę
-    wolne = float(portfel.get("saldo_gotowka", portfel.get("saldo_usdt", 0)))
+    # 2. Wartość pozycji z bazy
     wartosc_pozycji = 0.0
     
-    pozycje = portfel.get("pozycje", {})
-    for symbol, dane in pozycje.items():
-        # Ilość (obsługa starego i nowego formatu)
-        ilosc = float(dane.get("ilosc", 0))
-        if ilosc == 0: ilosc = float(dane.get("ilosc_coinow", 0))
+    try:
+        # Pobieramy symbol i ilość wszystkich aktywnych pozycji
+        db.cursor.execute("SELECT symbol, ilosc FROM aktywne_pozycje")
+        pozycje = db.cursor.fetchall()
         
-        cena_wej = float(dane.get("cena_wejscia", 0))
-        cena_akt = pobierz_cene_aktualna(symbol)
-        
-        # Jak brak ceny rynkowej, bierzemy cenę zakupu (żeby saldo nie spadało sztucznie)
-        if cena_akt <= 0: cena_akt = cena_wej
+        for sym, ilosc in pozycje:
+            cena_akt = pobierz_cene_aktualna(sym)
+            # Jeśli nie mamy ceny aktualnej, bierzemy cenę wejścia z bazy
+            if cena_akt == 0:
+                db.cursor.execute("SELECT cena_wejscia FROM aktywne_pozycje WHERE symbol=?", (sym,))
+                res = db.cursor.fetchone()
+                if res: cena_akt = res[0]
             
-        wartosc_pozycji += (ilosc * cena_akt)
-        
-    return wolne + wartosc_pozycji
+            wartosc_pozycji += (ilosc * cena_akt)
+            
+    except Exception as e:
+        print(f"⚠️ Błąd obliczania total: {e}")
 
-def pobierz_srodki(symbol, cena_akt, procent_kapitalu=0.10, zrodlo="SKANER"):
-    portfel = wczytaj_portfel()
-    saldo = float(portfel.get("saldo_gotowka", portfel.get("saldo_usdt", 0)))
+    return saldo_gotowka + wartosc_pozycji
+
+# Funkcja dla kompatybilności wstecznej (niektóre moduły mogą jej szukać, np. Skaner)
+# Skaner myśli, że dostaje JSONa, a my mu budujemy słownik z danych SQL. Magia.
+def wczytaj_portfel():
+    saldo = db.pobierz_saldo()[0]
     
-    # Limit slotów Skanera
+    db.cursor.execute("SELECT symbol, ilosc, cena_wejscia, zrodlo, typ_strategii, czas_wejscia, unikalne_id FROM aktywne_pozycje")
+    rows = db.cursor.fetchall()
+    pozycje_dict = {}
+    
+    for r in rows:
+        # Kluczem w starym portfelu był symbol (np. BTCUSDT)
+        # UWAGA: Jeśli mamy 2 strategie na BTC, stary system widziałby tylko jedną.
+        # Ale Skaner i tak ma swoje unikalne ID.
+        sym = r[0]
+        pozycje_dict[sym] = {
+            "symbol": sym, 
+            "ilosc": r[1], 
+            "cena_wejscia": r[2], 
+            "zrodlo": r[3], 
+            "typ_strategii": r[4], 
+            "czas_zakupu": r[5],
+            "max_zysk": 0.0 # Baza tego nie trzyma domyślnie, ale Skanerowi damy 0 na start
+        }
+    
+    return {
+        "saldo_gotowka": saldo,
+        "saldo_usdt": saldo,
+        "pozycje": pozycje_dict
+    }
+
+# Funkcja zapisu (dla kompatybilności - nic nie robi, bo SQL zapisuje na bieżąco)
+def zapisz_portfel(dane):
+    pass 
+
+# =========================================================
+# 🔥 GŁÓWNA FUNKCJA ZAKUPOWA (Z NASZYM FIXEM TYPU)
+# =========================================================
+def pobierz_srodki(symbol, cena_akt, procent_kapitalu=0.10, zrodlo="SKANER", typ_strategii="STANDARD"):
+    # 1. Sprawdzenie salda w SQL
+    saldo = db.pobierz_saldo()[0]
+    
+    # Limit slotów dla Skanera
     if zrodlo == "SKANER":
-        aktywne = len([k for k, v in portfel.get("pozycje", {}).items() if v.get("zrodlo") == "SKANER"])
-        if aktywne >= 7: return False, 0, 0
+        db.cursor.execute("SELECT count(*) FROM aktywne_pozycje WHERE zrodlo='SKANER'")
+        aktywne_cnt = db.cursor.fetchone()[0]
+        if aktywne_cnt >= 7: return False, 0, 0
     
-    # Kwota inwestycji
     if zrodlo == "MAIN_BOT":
-        kwota = min(saldo, 100.0) # Stała kwota dla Main Bota
+        kwota = min(saldo, 100.0)
     else:
-        # Skaner bierze % z całego kapitału (nie tylko wolnego)
         total = oblicz_wartosc_total()
         kwota = total * 0.10 
 
@@ -122,71 +157,77 @@ def pobierz_srodki(symbol, cena_akt, procent_kapitalu=0.10, zrodlo="SKANER"):
 
     ilosc_kupiona = kwota / cena_akt
     
-    # Aktualizacja
-    portfel["saldo_gotowka"] = saldo - kwota
-    if "saldo_usdt" in portfel: portfel["saldo_usdt"] = portfel["saldo_gotowka"]
-    
-    nowa_pozycja = {
-        "symbol": symbol,
-        "ilosc": ilosc_kupiona,
-        "ilosc_coinow": ilosc_kupiona, # Dublujemy dla pewności
-        "cena_wejscia": cena_akt,
-        "wartosc_wejscia": kwota,
-        "czas_zakupu": time.time(),
-        "zrodlo": zrodlo,
-        "typ_strategii": "skalp" if zrodlo == "SKANER" else "swing"
-    }
-    
-    portfel["pozycje"][symbol] = nowa_pozycja
-    zapisz_portfel(portfel)
-    
-    return True, ilosc_kupiona, kwota
-
-def zwroc_srodki(symbol, cena_wyjscia, zrodlo=None):
-    portfel = wczytaj_portfel()
-    
-    if symbol not in portfel["pozycje"]: return 0.0
+    # 2. Transakcja w SQL
+    try:
+        # 🔥 FIX: Ustalanie finalnego typu (skalp vs jednodniowa/tygodniowa itd.)
+        finalny_typ = "skalp" if zrodlo == "SKANER" else typ_strategii
         
-    poz = portfel["pozycje"][symbol]
-    ilosc = float(poz.get("ilosc", 0))
-    if ilosc == 0: ilosc = float(poz.get("ilosc_coinow", 0))
-    
-    wartosc_wyjscia = ilosc * cena_wyjscia
-    wartosc_wejscia = float(poz.get("wartosc_wejscia", ilosc * float(poz.get("cena_wejscia", 0))))
-    zysk_netto = wartosc_wyjscia - wartosc_wejscia
-    
-    # Zwrot
-    saldo_obecne = float(portfel.get("saldo_gotowka", portfel.get("saldo_usdt", 0)))
-    nowe_saldo = saldo_obecne + wartosc_wyjscia
-    portfel["saldo_gotowka"] = nowe_saldo
-    if "saldo_usdt" in portfel: portfel["saldo_usdt"] = nowe_saldo
-    
-    # Usunięcie
-    del portfel["pozycje"][symbol]
-    
-    # Historia (opcjonalnie, żeby był ślad)
-    if "historia" not in portfel: portfel["historia"] = []
-    wpis = {
-        "symbol": symbol,
-        "zysk": zysk_netto,
-        "czas": time.strftime('%Y-%m-%d %H:%M:%S')
-    }
-    portfel["historia"].append(wpis)
-    
-    zapisz_portfel(portfel)
-    return zysk_netto
+        # Odejmij środki (ujemna kwota)
+        db.aktualizuj_saldo(-kwota)
+        
+        # Dodaj pozycję do bazy
+        # (DatabaseHandler sam stworzy unikalne ID np. BTC_jednodniowa)
+        sukces = db.dodaj_pozycje(symbol, finalny_typ, cena_akt, ilosc_kupiona, zrodlo, "Kupno")
+        
+        if sukces:
+            return True, ilosc_kupiona, kwota
+        else:
+            # Rollback (oddaj kasę jak się nie udało dodać pozycji - np. duplikat)
+            db.aktualizuj_saldo(kwota)
+            return False, 0, 0
+            
+    except Exception as e:
+        print(f"⚠️ Błąd SQL przy zakupie: {e}")
+        return False, 0, 0
 
-# --- [DODANE 1] Import funkcji do czyszczenia pamięci mózgu ---
-try:
-    # Dodajemy bieżący folder do ścieżki, żeby znaleźć data_storage
-    sys.path.append(os.path.dirname(os.path.abspath(__file__))) 
-    from data_storage import aktualizuj_status_strategii
-except ImportError:
-    # Zabezpieczenie, żeby się nie wywalił, jak nie znajdzie pliku
-    def aktualizuj_status_strategii(symbol, status, wynik): pass
-# -------------------------------------------------------------
+# =========================================================
+# 🔥 FUNKCJA SPRZEDAŻY
+# =========================================================
+def zwroc_srodki(symbol, cena_wyjscia, zrodlo=None):
+    try:
+        # Pobieramy pozycje dla danego symbolu
+        db.cursor.execute("SELECT * FROM aktywne_pozycje WHERE symbol=?", (symbol,))
+        rows = db.cursor.fetchall()
+        
+        if not rows: return 0.0
+        
+        # Wybieramy właściwą pozycję
+        # rows to: unikalne_id, symbol, typ, cena_wej, ilosc, czas... (zobacz database_handler)
+        poz = None
+        for r in rows:
+            # r[6] to zrodlo w mojej strukturze tabeli
+            if zrodlo == "SKANER" and r[6] == "SKANER": poz = r; break
+            if zrodlo != "SKANER" and r[6] != "SKANER": poz = r; break
+            
+        if not poz: poz = rows[0] # Fallback
+        
+        # Rozpakuj dane z SQL
+        unikalne_id = poz[0]
+        typ_strat = poz[2]
+        cena_wej = poz[3]
+        ilosc = poz[4]
+        
+        wartosc_wyjscia = ilosc * cena_wyjscia
+        wartosc_wejscia = ilosc * cena_wej
+        zysk_netto = wartosc_wyjscia - wartosc_wejscia
+        zysk_proc = ((cena_wyjscia - cena_wej) / cena_wej) * 100
+        
+        # 1. Usuń pozycję z aktywnych
+        db.usun_pozycje(symbol, typ_strat)
+        
+        # 2. Dodaj kasę do salda
+        db.aktualizuj_saldo(wartosc_wyjscia)
+        
+        # 3. Zapisz w historii (Archiwum)
+        db.zapisz_historie_transakcji(symbol, typ_strat, zysk_netto, zysk_proc, "Sprzedaż")
+        
+        # 4. Aktualizuj Mózg (Feedback Loop)
+        if zrodlo != "SKANER":
+            db.aktualizuj_strategie_mozgu(symbol, typ_strat, zysk_proc, "ZAKONCZONA")
+            print(f"   💾 [SQL] Zaktualizowano inteligencję dla {symbol} ({zysk_proc:.2f}%)")
 
-# Inicjalizacja przy imporcie (żeby plik istniał)
-if not os.path.exists(PLIK_PORTFELA):
-    dane_start = {"saldo_gotowka": 1000.0, "pozycje": {}}
-    zapisz_portfel(dane_start)
+        return zysk_netto
+
+    except Exception as e:
+        print(f"⚠️ Błąd SQL przy sprzedaży: {e}")
+        return 0.0

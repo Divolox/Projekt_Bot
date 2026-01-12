@@ -2,57 +2,77 @@ import json
 from datetime import datetime, timezone
 import time
 import random
+import sys
+import os
 import statistics
-from ai_helper import ask_ai
-from strategia_helper import save_strategies, extract_knowledge
-from data_storage import wczytaj_strategie_bota 
-from utils_data import analizuj_pelny_obraz, calc_rsi
 
-# Ścieżki do plików
+# Import modułów
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.append(current_dir)
+
+try:
+    from ai_helper import ask_ai
+    from strategia_helper import save_strategies, extract_knowledge
+    from utils_data import analizuj_pelny_obraz, calc_rsi
+    from database_handler import DatabaseHandler # Nowy kolega
+except ImportError as e:
+    print(f"❌ Błąd importu w Mózgu: {e}")
+    sys.exit()
+
+# Łączymy się z bazą (Tylko do odczytu historii i aktywnych)
+db = DatabaseHandler()
+
+# Ścieżki do plików (Rynek nadal z pliku, bo to dane zewnętrzne)
 RYNEK_PATH = "rynek.json"
-MOZG_PATH = "mozg.json"
-STRATEGIE_TEMP_PATH = "strategie.json"
+MOZG_PATH = "mozg.json" # Plik komunikacyjny dla Schedulera (zostaje jako plik tymczasowy)
+STRATEGIE_TEMP_PATH = "strategie.json" # Tymczasowe (debug)
 
 def load_data(path):
-    """Bezpieczne wczytywanie JSON"""
     try:
         with open(path, "r", encoding="utf-8") as f: return json.load(f)
     except: return {}
 
 def save_brain(brain):
-    """Zapis decyzji dla Schedulera"""
     try:
         with open(MOZG_PATH, "w", encoding="utf-8") as f: json.dump(brain, f, indent=2)
     except: pass
 
 def przygotuj_historie():
-    """Pobiera historię ostatnich transakcji dla AI"""
-    strategie = wczytaj_strategie_bota()
-    ocenione = [s for s in strategie if isinstance(s, dict) and s.get("status") == "oceniona"]
-    ocenione.sort(key=lambda x: x.get("czas_utworzenia", ""), reverse=True)
-    if not ocenione: return "Brak historii."
-    raport = ""
-    for s in ocenione[:5]:
-        sym = s.get("symbol")
-        typ = s.get("typ")
-        wynik = s.get("ocena", {}).get("wynik", "?")
-        raport += f"- {sym} [{typ}]: {wynik}\n"
-    return raport
+    """
+    Pobiera historię ostatnich transakcji Z BAZY DANYCH dla AI.
+    Zastępuje czytanie z strategie_bota.json.
+    """
+    try:
+        # Pobieramy ostatnie 5 transakcji z historii
+        db.cursor.execute("SELECT symbol, typ_strategii, zysk_proc FROM historia_transakcji ORDER BY id DESC LIMIT 5")
+        rows = db.cursor.fetchall()
+        
+        if not rows: return "Brak historii."
+        
+        raport = ""
+        for r in rows:
+            sym = r[0]
+            typ = r[1]
+            wynik = f"{r[2]:.2f}%"
+            raport += f"- {sym} [{typ}]: {wynik}\n"
+        return raport
+    except Exception as e:
+        return f"Błąd pobierania historii: {e}"
 
 # =========================================================
 # 🧠 INTELIGENTNY ALGORYTM (Snajper - Analiza Techniczna)
 # =========================================================
 def analiza_techniczna_zapasowa(typ, market_data, zablokowane_pary=[]):
+    # --- LOGIKA SNAJPERA BEZ ZMIAN ---
     kandydaci = []
     mapa_int = {"godzinowa": "1h", "4-godzinna": "4h", "jednodniowa": "1d", "tygodniowa": "1w"}
     interwal = mapa_int.get(typ, "1h")
 
-    # Pobieranie sentymentu
     try:
         fng = int(market_data.get("sentiment", {}).get("value", 50))
     except: fng = 50
 
-    # Ustawienia w zależności od strachu/chciwości
     limit_rsi_dip = 45
     min_vol_ratio = 1.0
     tryb = "NEUTRALNY"
@@ -66,12 +86,10 @@ def analiza_techniczna_zapasowa(typ, market_data, zablokowane_pary=[]):
         limit_rsi_dip = 60
         min_vol_ratio = 0.8
         
-    # Dla scalpu (godzinowa) wymagamy lepszych warunków
     if "godz" in typ:
         limit_rsi_dip -= 4
         min_vol_ratio += 0.3
 
-    # GŁÓWNA PĘTLA ALGORYTMU
     for symbol, intervals in market_data.get("data", {}).items():
         symbol_usdt = symbol + "USDT"
         
@@ -82,27 +100,22 @@ def analiza_techniczna_zapasowa(typ, market_data, zablokowane_pary=[]):
 
         swiece = intervals.get(interwal, [])
         
-        # 2. Sprawdź czy mamy wystarczająco dużo danych
         if not swiece or len(swiece) < 15:
-            print(f"   ➤ [ALGO][{typ}] ⚠️ Pomijam {symbol}: Za mało świec ({len(swiece) if swiece else 0}/15)")
+            # print(f"   ➤ [ALGO][{typ}] ⚠️ Pomijam {symbol}: Za mało świec")
             continue
         
-        # 3. Analiza wskaźników
         ceny = [x['c'] for x in swiece]
         volumeny = [x['v'] for x in swiece]
         cena_akt = ceny[-1]
         rsi = calc_rsi(swiece)
-        # SMA20
         sma_20 = statistics.mean(ceny[-20:]) if len(ceny) >= 20 else statistics.mean(ceny)
         trend = "wzrost" if cena_akt > sma_20 else "spadek"
         
-        # Wolumen relatywny (ostatni vs średnia z 5)
         avg_vol = statistics.mean(volumeny[-5:])
         vol_ratio = volumeny[-1] / avg_vol if avg_vol > 0 else 0
         
         odrzut = ""
         
-        # 4. Filtry odrzucające (Logowanie odrzutów)
         if vol_ratio < min_vol_ratio:
             if not (rsi < 25): odrzut = f"Słaby wolumen ({vol_ratio:.1f}x vs {min_vol_ratio}x)"
         elif trend == "spadek" and rsi > limit_rsi_dip:
@@ -114,10 +127,9 @@ def analiza_techniczna_zapasowa(typ, market_data, zablokowane_pary=[]):
             print(f"   ➤ [ALGO][{typ}] 💤 Pas {symbol}: {odrzut}")
             continue
 
-        # 5. Sprawdzanie warunków wejścia (Kandydaci)
         is_candidate = False
         
-        # Strategia A: Łapanie dołka (DIP)
+        # Strategia A: DIP
         if rsi <= limit_rsi_dip:
             kandydaci.append({
                 "nazwa": f"{symbol}_SmartDip", "symbol": symbol, "typ": typ,
@@ -126,7 +138,7 @@ def analiza_techniczna_zapasowa(typ, market_data, zablokowane_pary=[]):
             })
             is_candidate = True
             
-        # Strategia B: Jazda z trendem (TREND)
+        # Strategia B: TREND
         elif trend == "wzrost" and fng > 40 and rsi < 65:
             kandydaci.append({
                 "nazwa": f"{symbol}_TrendRide", "symbol": symbol, "typ": typ,
@@ -135,16 +147,12 @@ def analiza_techniczna_zapasowa(typ, market_data, zablokowane_pary=[]):
             })
             is_candidate = True
             
-        # Jeśli coin jest OK, ale nie spełnił warunków wejścia (Logowanie neutralności)
         if not is_candidate:
             print(f"   ➤ [ALGO][{typ}] 💤 Pas {symbol}: Brak sygnału (Neutralnie)")
 
-    # Wybór zwycięzcy dla tego typu strategii
     if kandydaci:
-        # Preferencje dla BTC/ETH przy strachu
         if fng < 40:
             kandydaci.sort(key=lambda x: 3 if x['symbol'] == 'BTC' else (2 if x['symbol'] == 'ETH' else 1), reverse=True)
-        
         wybor = random.choice(kandydaci)
         print(f"   ➤ [ALGO][{typ}] 🎯 CEL ({tryb}): {wybor['symbol']} ({wybor['warunek']})")
         return [wybor]
@@ -152,10 +160,7 @@ def analiza_techniczna_zapasowa(typ, market_data, zablokowane_pary=[]):
     return []
 
 def generuj_raport_4_slotowy(obraz, historia, sentyment_str, sentyment_wartosc, dostepne_coiny):
-    """
-    To jest Twój PROMPT dla AI. 
-    Wymusza analizę każdego coina i zwrócenie listy JSON.
-    """
+    # --- PROMPT DLA AI BEZ ZMIAN ---
     lista_coinow_str = ", ".join(dostepne_coiny)
 
     prompt = f"""
@@ -165,6 +170,8 @@ def generuj_raport_4_slotowy(obraz, historia, sentyment_str, sentyment_wartosc, 
     === SYTUACJA RYNKOWA ===
     Globalny Sentyment: {sentyment_str} (Index: {sentyment_wartosc}/100)
     DOSTĘPNE MONETY DO ANALIZY: {lista_coinow_str}
+    HISTORIA TRANSAKCJI (Twoje wyniki):
+    {historia}
     
     === TWOJA STRATEGIA (INTELIGENCJA) ===
     1. FILTR BITCOINA (Najważniejsze):
@@ -210,18 +217,16 @@ def generuj_raport_4_slotowy(obraz, historia, sentyment_str, sentyment_wartosc, 
     """
     return ask_ai(prompt)
 
-def wybierz_najlepsza_strategie(kandydaci, aktywne_pozycje):
+def wybierz_najlepsza_strategie(kandydaci):
+    """
+    Wybiera najlepszą strategię, sprawdzając zajęte sloty W BAZIE SQL.
+    """
     if not kandydaci: return None
 
-    # Zbieranie zajętych slotów
-    zajete_sloty = set()
-    for id_pozycji, p in aktywne_pozycje.items():
-        if "_" in id_pozycji:
-            zajete_sloty.add(id_pozycji)
-        else:
-            sym = p.get("symbol", "")
-            typ = p.get("typ", "STANDARD")
-            zajete_sloty.add(f"{sym}_{typ}")
+    # Zbieranie zajętych slotów Z BAZY
+    # Pobieramy unikalne_id wszystkich aktywnych pozycji
+    db.cursor.execute("SELECT unikalne_id FROM aktywne_pozycje")
+    zajete_sloty = set([row[0] for row in db.cursor.fetchall()])
 
     # Filtrowanie
     wolni_kandydaci = []
@@ -281,12 +286,12 @@ def main():
             obraz_rynku += analizuj_pelny_obraz(intervals)
 
         try:
+            # Historia teraz idzie z SQL przez funkcję przygotuj_historie()
             resp = generuj_raport_4_slotowy(obraz_rynku, przygotuj_historie(), sentyment_klasa, sentyment_val, dostepne_coiny)
             
             if resp:
                 raport, msg = extract_knowledge(resp)
                 if raport:
-                    # FIX: Obsługa LISTY (wymagane dla logów)
                     if isinstance(raport, list):
                         for pozycja in raport:
                             if not isinstance(pozycja, dict): continue
@@ -298,7 +303,6 @@ def main():
 
                             sym_short = sym.replace("USDT", "")
 
-                            # LOGOWANIE DECYZJI AI
                             ikona = "✅" if decyzja == "TAK" else "❌"
                             print(f"   {ikona} {decyzja} [{typ}]: {sym} -> {warunek}")
 
@@ -338,14 +342,14 @@ def main():
         print(f"🚀 SUKCES! Znaleziono {len(finalne_strategie)} kandydatów.")
         save_strategies(finalne_strategie)
         
-        aktywne = wczytaj_strategie_bota()
-        wybrana = wybierz_najlepsza_strategie(finalne_strategie, aktywne)
+        # Wybieranie najlepszej (Teraz sprawdza sloty w SQL)
+        wybrana = wybierz_najlepsza_strategie(finalne_strategie)
         
         if wybrana:
             decyzja_dla_schedulera = {
                 "akcja": "KUP", 
                 "symbol": wybrana["symbol"],
-                "typ_strategii": wybrana["typ"],
+                "typ_strategii": wybrana["typ"], # Kluczowe dla Schedulera
                 "zrodlo": wybrana.get("zrodlo", "Algorytm"),
                 "uzasadnienie": wybrana["warunek"],
                 "timestamp": datetime.now(timezone.utc).isoformat()

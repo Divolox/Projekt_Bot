@@ -1,7 +1,22 @@
 import json
 import requests
 import time
+import sys
+import os
 from datetime import datetime, timezone
+
+# --- DODANO: Obsługa Bazy Danych ---
+# Dodajemy ścieżkę do modułów (na wypadek uruchamiania z podkatalogu)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.append(current_dir)
+
+try:
+    from database_handler import DatabaseHandler
+except ImportError:
+    print("❌ Błąd: Brak pliku database_handler.py")
+    sys.exit()
+# -----------------------------------
 
 def get_fear_and_greed():
     """Pobiera wskaźnik sentymentu"""
@@ -16,7 +31,10 @@ def get_fear_and_greed():
     return {"value": "50", "value_classification": "Neutral"}
 
 def get_binance_ohlc(symbol, interval, limit):
-    """Pobiera świece z Binance. KRYTYCZNE: Musi zawierać 'v' (wolumen)"""
+    """
+    Pobiera świece z Binance. 
+    KRYTYCZNE: Musi zawierać 'v' (wolumen) dla JSON i pełne nazwy dla SQL.
+    """
     url = "https://api.binance.com/api/v3/klines"
     params = {"symbol": symbol.replace("-", "").upper(), "interval": interval, "limit": limit}
     try:
@@ -25,11 +43,21 @@ def get_binance_ohlc(symbol, interval, limit):
             data = resp.json()
             ohlc = []
             for e in data:
+                # e = [time, open, high, low, close, volume, ...]
                 ohlc.append({
+                    # --- DLA KOMPATYBILNOŚCI Z RYNEK.JSON (TWOJE) ---
                     "c": float(e[4]), # Close price
                     "h": float(e[2]), # High price
                     "l": float(e[3]), # Low price
-                    "v": float(e[5])  # <--- TU JEST WOLUMEN. BEZ TEGO WYWALA BŁĄD.
+                    "v": float(e[5]), # Wolumen
+                    
+                    # --- DLA BAZY SQL (NOWE) ---
+                    "time": int(e[0] / 1000), # Timestamp (sekundy)
+                    "open": float(e[1]),
+                    "high": float(e[2]),
+                    "low": float(e[3]),
+                    "close": float(e[4]),
+                    "vol": float(e[5])
                 })
             return ohlc
     except Exception as e:
@@ -37,7 +65,10 @@ def get_binance_ohlc(symbol, interval, limit):
     return []
 
 def main():
-    print("📡 OBSERWATOR: Pobieram dane (1H, 4H, 1D, 1W) + Wolumen...")
+    print("📡 OBSERWATOR: Pobieram dane (MTF + SQL History)...")
+    
+    # Inicjalizacja bazy
+    db = DatabaseHandler()
     
     # 1. Sentyment
     fng = get_fear_and_greed()
@@ -58,23 +89,40 @@ def main():
         market_data["data"][short_sym] = {}
         
         # Pętla po interwałach (MTF)
-        intervals = ["1h", "4h", "1d", "1w"]
+        # ZWIĘKSZONO LIMIT DLA DŁUGICH INTERWAŁÓW (Dla SQL Support)
+        intervals_config = {
+            "1h": 24,   # 24 świece dla JSON
+            "4h": 20,
+            "1d": 60,   # 60 dni (2 miesiące) dla bazy SQL (żeby znaleźć Dno)
+            "1w": 20    # 20 tygodni
+        }
         
-        for interv in intervals:
-            ohlc = get_binance_ohlc(sym, interv, 20)
-            market_data["data"][short_sym][interv] = ohlc
+        for interv, limit in intervals_config.items():
+            ohlc = get_binance_ohlc(sym, interv, limit)
+            
+            if ohlc:
+                # A. Zapis do JSON (dla starej logiki)
+                market_data["data"][short_sym][interv] = ohlc
+                
+                # B. Zapis do SQL (dla nowej logiki "Wzroku")
+                # Bot zapisze te świece w tabeli historia_swiec
+                db.zapisz_swiece(short_sym, interv, ohlc)
+            
             time.sleep(0.1) # Lekkie opóźnienie dla API
 
         # Log dla użytkownika (żebyś widział, że działa)
         if "1h" in market_data["data"][short_sym] and market_data["data"][short_sym]["1h"]:
             last_price = market_data["data"][short_sym]["1h"][-1]["c"]
             market_data["prices"].append({"symbol": sym, "current_price": last_price})
-            print(f"   > {short_sym}: {last_price} USD (Pobrano MTF + VSA)")
+            print(f"   > {short_sym}: {last_price} USD (SQL Updated)")
 
-    # 3. Zapis
+    # 3. Zapis JSON
     with open("rynek.json", "w", encoding="utf-8") as f:
         json.dump(market_data, f, indent=2)
-    print("💾 Dane zapisane poprawnie (Z Wolumenem).")
+    
+    # Zamknięcie bazy
+    db.zamknij()
+    print("💾 Dane zapisane (JSON + SQL). Baza rośnie.")
 
 if __name__ == "__main__":
     main()

@@ -14,7 +14,8 @@ if current_dir not in sys.path:
 try:
     from ai_helper import ask_ai
     from strategia_helper import save_strategies, extract_knowledge
-    from utils_data import analizuj_pelny_obraz, calc_rsi
+    # ZMIANA: Importujemy nową funkcję budującą obraz rynku z bazy
+    from utils_data import buduj_obraz_rynku_v2, calc_rsi
     from database_handler import DatabaseHandler # Nowy kolega
 except ImportError as e:
     print(f"❌ Błąd importu w Mózgu: {e}")
@@ -61,10 +62,12 @@ def przygotuj_historie():
         return f"Błąd pobierania historii: {e}"
 
 # =========================================================
-# 🧠 INTELIGENTNY ALGORYTM (Snajper - Analiza Techniczna)
+# 🧠 INTELIGENTNY ALGORYTM V2 (Snajper + Wzrok SQL)
 # =========================================================
 def analiza_techniczna_zapasowa(typ, market_data, zablokowane_pary=[]):
-    # --- LOGIKA SNAJPERA BEZ ZMIAN ---
+    # Potrzebujemy importu tutaj, jeśli nie ma go na górze, ale zakładamy że jest w utils_data
+    from utils_data import analizuj_dynamike_swiecy 
+    
     kandydaci = []
     mapa_int = {"godzinowa": "1h", "4-godzinna": "4h", "jednodniowa": "1d", "tygodniowa": "1w"}
     interwal = mapa_int.get(typ, "1h")
@@ -93,19 +96,18 @@ def analiza_techniczna_zapasowa(typ, market_data, zablokowane_pary=[]):
     for symbol, intervals in market_data.get("data", {}).items():
         symbol_usdt = symbol + "USDT"
         
-        # 1. Sprawdź czy AI już nie zajęło tego coina
+        # 1. Sprawdź blokady
         if (symbol, typ) in zablokowane_pary or (symbol_usdt, typ) in zablokowane_pary:
             print(f"   ➤ [ALGO][{typ}] ⏭️ Pas {symbol}: AI już zajęło ten slot.")
             continue
 
         swiece = intervals.get(interwal, [])
+        if not swiece or len(swiece) < 15: continue
         
-        if not swiece or len(swiece) < 15:
-            # print(f"   ➤ [ALGO][{typ}] ⚠️ Pomijam {symbol}: Za mało świec")
-            continue
+        # Dane świecowe
+        ceny = [s.get('c', s.get('close')) for s in swiece]
+        volumeny = [s.get('v', s.get('vol')) for s in swiece]
         
-        ceny = [x['c'] for x in swiece]
-        volumeny = [x['v'] for x in swiece]
         cena_akt = ceny[-1]
         rsi = calc_rsi(swiece)
         sma_20 = statistics.mean(ceny[-20:]) if len(ceny) >= 20 else statistics.mean(ceny)
@@ -114,14 +116,36 @@ def analiza_techniczna_zapasowa(typ, market_data, zablokowane_pary=[]):
         avg_vol = statistics.mean(volumeny[-5:])
         vol_ratio = volumeny[-1] / avg_vol if avg_vol > 0 else 0
         
+        # --- [NOWOŚĆ] WZROK BOTA (SQL + DYNAMIKA) ---
+        dno_30d = db.znajdz_dno_historyczne(symbol, "1d", 30)
+        odleglosc_od_dna = 100
+        if dno_30d and dno_30d > 0:
+            odleglosc_od_dna = ((cena_akt - dno_30d) / dno_30d) * 100
+            
+        ostatnia_swieca = swiece[-1]
+        dynamika_opis = analizuj_dynamike_swiecy(ostatnia_swieca)
+        
+        # Bonus za bycie na dnie
+        local_rsi_limit = limit_rsi_dip
+        if odleglosc_od_dna < 5.0: # Jesteśmy na wsparciu!
+            local_rsi_limit += 5 # Snajper jest odważniejszy
+            tryb += " + WSPARCIE"
+
         odrzut = ""
         
-        if vol_ratio < min_vol_ratio:
-            if not (rsi < 25): odrzut = f"Słaby wolumen ({vol_ratio:.1f}x vs {min_vol_ratio}x)"
-        elif trend == "spadek" and rsi > limit_rsi_dip:
+        # FILTRY ODRZUCAJĄCE
+        if vol_ratio < min_vol_ratio and not (rsi < 25): 
+            odrzut = f"Słaby wolumen ({vol_ratio:.1f}x)"
+        elif trend == "spadek" and rsi > local_rsi_limit:
              odrzut = f"Spadek + RSI {rsi:.1f} za wysokie"
         elif trend == "wzrost" and rsi >= 70:
              odrzut = f"Wykupione ({rsi:.1f})"
+        
+        # [NOWE FILTRY] Wzrok
+        elif "Długi górny cień" in dynamika_opis:
+            odrzut = f"Górny cień (Presja podaży)"
+        elif odleglosc_od_dna > 50.0 and rsi > 60:
+            odrzut = f"Wysoko od dna (+{odleglosc_od_dna:.0f}%) + RSI wysokie"
 
         if odrzut:
             print(f"   ➤ [ALGO][{typ}] 💤 Pas {symbol}: {odrzut}")
@@ -129,26 +153,34 @@ def analiza_techniczna_zapasowa(typ, market_data, zablokowane_pary=[]):
 
         is_candidate = False
         
-        # Strategia A: DIP
-        if rsi <= limit_rsi_dip:
+        # Strategia A: DIP (Z uwzględnieniem Dna i Cieni)
+        # Warunek: RSI nisko LUB (Jesteśmy na dnie I mamy dolny cień)
+        warunek_dna = (odleglosc_od_dna < 3.0 and "Długi dolny cień" in dynamika_opis)
+        
+        if rsi <= local_rsi_limit or warunek_dna:
+            powod = f"DIP ({tryb}) RSI {rsi:.1f}"
+            if warunek_dna: powod += " + ODBICIE OD DNA 🔥"
+            
             kandydaci.append({
                 "nazwa": f"{symbol}_SmartDip", "symbol": symbol, "typ": typ,
-                "warunek": f"DIP ({tryb}) RSI {rsi:.1f} + Vol {vol_ratio:.1f}x",
+                "warunek": powod,
                 "oczekiwany_ruch": "wzrost", "pewnosc": "średnia"
             })
             is_candidate = True
             
         # Strategia B: TREND
         elif trend == "wzrost" and fng > 40 and rsi < 65:
-            kandydaci.append({
-                "nazwa": f"{symbol}_TrendRide", "symbol": symbol, "typ": typ,
-                "warunek": f"TREND ({tryb}) RSI {rsi:.1f} + Vol {vol_ratio:.1f}x",
-                "oczekiwany_ruch": "wzrost", "pewnosc": "wysoka"
-            })
-            is_candidate = True
+            # Nie wchodzimy w trend, jeśli świeca jest brzydka (Doji/Górny cień)
+            if "Doji" not in dynamika_opis:
+                kandydaci.append({
+                    "nazwa": f"{symbol}_TrendRide", "symbol": symbol, "typ": typ,
+                    "warunek": f"TREND ({tryb}) RSI {rsi:.1f} + Vol {vol_ratio:.1f}x",
+                    "oczekiwany_ruch": "wzrost", "pewnosc": "wysoka"
+                })
+                is_candidate = True
             
         if not is_candidate:
-            print(f"   ➤ [ALGO][{typ}] 💤 Pas {symbol}: Brak sygnału (Neutralnie)")
+            print(f"   ➤ [ALGO][{typ}] 💤 Pas {symbol}: Brak sygnału")
 
     if kandydaci:
         if fng < 40:
@@ -160,7 +192,7 @@ def analiza_techniczna_zapasowa(typ, market_data, zablokowane_pary=[]):
     return []
 
 def generuj_raport_4_slotowy(obraz, historia, sentyment_str, sentyment_wartosc, dostepne_coiny):
-    # --- PROMPT DLA AI BEZ ZMIAN ---
+    # --- PROMPT DLA AI Z AKTUALIZACJĄ O WZROK ---
     lista_coinow_str = ", ".join(dostepne_coiny)
 
     prompt = f"""
@@ -173,23 +205,30 @@ def generuj_raport_4_slotowy(obraz, historia, sentyment_str, sentyment_wartosc, 
     HISTORIA TRANSAKCJI (Twoje wyniki):
     {historia}
     
+    === DANE DO ANALIZY (WZROK BOTA) ===
+    Otrzymujesz dane o:
+    1. Pozycji ceny względem 30-dniowego DNA (Wsparcie z bazy danych).
+    2. Dynamice świec (Kształt, Cienie, Siła).
+    
+    {obraz}
+    
     === TWOJA STRATEGIA (INTELIGENCJA) ===
     1. FILTR BITCOINA (Najważniejsze):
        - Jeśli BTC spada dynamicznie -> ODRZUCAJ WSZYSTKIE ALTCOINY (Risk Off).
        - Jeśli BTC jest stabilny lub rośnie -> Szukaj okazji (Risk On).
        
     2. ANALIZA TECHNICZNA (Szukaj Konfluencji):
-       - RSI < 30 + Extreme Fear: To zazwyczaj okazja na "Odbicie Zdechłego Kota" lub odwrócenie. BIERZ, jeśli wolumen nie jest paniczny.
-       - RSI > 70 + Greed: Ryzyko korekty. Nie kupuj, chyba że to wybicie (Breakout) na ogromnym wolumenie.
-       - Volume Ratio: Jeśli < 0.5 -> Rynek martwy, unikaj. Jeśli > 2.0 -> Coś się dzieje (uwaga na pompy).
+       - RSI < 30 + Extreme Fear: Okazja na odbicie.
+       - RSI > 70 + Greed: Ryzyko korekty. Nie kupuj, chyba że to wybicie na wolumenie.
+       - Volume Ratio: < 0.5 unikać (martwy rynek), > 2.0 obserwować (pompa).
+       - DNO Z BAZY: Jeśli cena jest blisko 30-dniowego dołka (+0-5%) -> SZUKAJ WEJŚCIA.
+       - DYNAMIKA: Jeśli widzisz długi dolny cień (Pinbar) na wsparciu -> SILNY SYGNAŁ KUPNA.
+       - DYNAMIKA: Jeśli widzisz długi górny cień na oporze -> UNIKAJ.
        
     3. KONSEKWENCJA:
        - Nie "zgaduj". Jeśli nie ma czystego sygnału -> Decyzja: NIE.
        - Lepiej stracić okazję niż stracić kapitał.
 
-    DANE DO ANALIZY (PRZEANALIZUJ KAŻDĄ PARĘ INDYWIDUALNIE):
-    {obraz}
-    
     === FORMAT ODPOWIEDZI (WYMAGANY) ===
     Musisz zwrócić WYŁĄCZNIE poprawny kod JSON będący LISTĄ obiektów.
     Przeanalizuj WSZYSTKIE monety z listy: {lista_coinow_str}. Nie pomijaj żadnej.
@@ -202,7 +241,7 @@ def generuj_raport_4_slotowy(obraz, historia, sentyment_str, sentyment_wartosc, 
     3. 'jednodniowa'
     4. 'tygodniowa'
     
-    To oznacza, że jeśli masz 4 monety, musisz zwrócić dokładnie 16 obiektów JSON (4x4).
+    To oznacza, że jeśli masz 4 monety, musisz zwrócić dokładnie 16 obiektów JSON.
     Dla każdego obiektu zdecyduj: "TAK" (Kupuj) lub "NIE" (Czekaj).
     
     FORMAT ODPOWIEDZI (LISTA JSON):
@@ -224,9 +263,11 @@ def wybierz_najlepsza_strategie(kandydaci):
     if not kandydaci: return None
 
     # Zbieranie zajętych slotów Z BAZY
-    # Pobieramy unikalne_id wszystkich aktywnych pozycji
-    db.cursor.execute("SELECT unikalne_id FROM aktywne_pozycje")
-    zajete_sloty = set([row[0] for row in db.cursor.fetchall()])
+    try:
+        db.cursor.execute("SELECT unikalne_id FROM aktywne_pozycje")
+        zajete_sloty = set([row[0] for row in db.cursor.fetchall()])
+    except:
+        zajete_sloty = set()
 
     # Filtrowanie
     wolni_kandydaci = []
@@ -276,14 +317,16 @@ def main():
     # --- SEKCJA AI ---
     if not tryb_tylko_algo:
         print("-" * 50)
-        print(f"🤖 [1] KONSULTACJA AI (Gemini):")
+        print(f"🤖 [1] KONSULTACJA AI (Gemini + Wzrok SQL):")
         
         obraz_rynku = ""
         dostepne_coiny = list(market["data"].keys())
         
-        for sym, intervals in market["data"].items():
-            obraz_rynku += f"\nANALIZA {sym}:\n"
-            obraz_rynku += analizuj_pelny_obraz(intervals)
+        for sym in dostepne_coiny:
+            # ZMIANA: Używamy nowej funkcji budującej obraz z bazy (Wzrok)
+            # Przekazujemy 'db' jako uchwyt do bazy
+            symbol_data = market["data"][sym]
+            obraz_rynku += buduj_obraz_rynku_v2(sym, symbol_data, db)
 
         try:
             # Historia teraz idzie z SQL przez funkcję przygotuj_historie()

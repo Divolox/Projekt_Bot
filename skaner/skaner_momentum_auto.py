@@ -188,7 +188,7 @@ def main():
             if zm < -1.8: akcja, powod = "STOP LOSS", f"Strata {zm:.2f}%"
             elif zm >= 25.0: akcja, powod = "MOONSHOT", f"Zysk {zm:.2f}%"
             elif max_z >= 1.2 and zm < 0.1: akcja, powod = "BREAK EVEN", "Ochrona kapitału"
-            elif max_z >= 2.5 and zm < (max_z * 0.6): akcja, powod = "TRAILING", f"Ochrona (Max: {max_z:.1f}%)"
+            elif max_z >= 2.5 and zm < (max_z * 0.8): akcja, powod = "TRAILING", f"Ochrona (Max: {max_z:.1f}%)"
             elif czas_trwania >= 4 and zm < 0.2: akcja, powod = "STAGNATION", "Brak ruchu (4min)"
             elif czas_trwania >= 60: akcja, powod = "TIMEOUT", "Koniec czasu (1h)"
 
@@ -292,3 +292,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+    elif

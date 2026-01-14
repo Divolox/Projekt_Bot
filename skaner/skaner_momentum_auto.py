@@ -5,14 +5,14 @@ import os
 from datetime import datetime, timedelta
 
 # ==============================================================================
-# 🚀 SKANER HYBRYDOWY V10.0 (SQL + FIZYKA + BLACKLIST)
+# 🚀 SKANER HYBRYDOWY V10.3 (FIX: CENA 0.00001 + KOMENTARZE)
 # ==============================================================================
 
 # --- 1. INTEGRACJA Z BAZĄ DANYCH ---
 current_dir = os.path.dirname(os.path.abspath(__file__)) 
 parent_dir = os.path.dirname(current_dir)              
 sys.path.append(parent_dir)
-os.chdir(parent_dir) # Kluczowe dla widoczności bazy
+os.chdir(parent_dir)
 
 try:
     import portfel_manager as pm
@@ -23,18 +23,23 @@ except ImportError:
 
 db = DatabaseHandler()
 
-# --- 2. KONFIGURACJA STRATEGII (TWOJA ORYGINALNA) ---
+# --- 2. KONFIGURACJA STRATEGII ---
 MIN_VOL_24H = 450000 
+
+# [FIX] CENA MINIMALNA: 0.00001
+# Eliminuje BTTC (0.000001), ale zostawia BONK (0.00002) i 1000SATS (0.0002)
+MIN_CENA = 0.00001 
+
 MAX_POZYCJI_SKANERA = 7 
 INTERVAL_SKANOWANIA_NOWYCH = 300 # 5 minut
 INTERVAL_OCHRONY = 10            # 10 sekund
 COOLDOWN_CZAS = 3600      
 
-CFG_AGRESYWNY = { "PRÓG": 2.2, "RSI": 88, "NAZWA": "🔥 AGRESYWNY (Pon-Sob)" }
+# [FIX] Podniesiony próg do 3.5%, żeby ominąć szum, gdy BTC rośnie
+CFG_AGRESYWNY = { "PRÓG": 3.5, "RSI": 88, "NAZWA": "🔥 AGRESYWNY (Pon-Sob)" }
 CFG_BEZPIECZNY = { "PRÓG": 2.8, "RSI": 75, "NAZWA": "🛡️ BEZPIECZNY (Niedziela)" }
 
-# --- [NOWOŚĆ] KONFIGURACJA OCHRONNA ---
-BAN_DNI = 3  # Ile dni bana za stratę
+BAN_DNI = 3      # Ile dni bana za stratę
 PROG_ACCEL = 0.0 # Przyspieszenie musi być dodatnie (nie hamujemy)
 
 # Pamięć podręczna do fizyki (nie obciąża bazy ani API)
@@ -68,7 +73,7 @@ def get_kline_rsi(symbol):
 
 # --- POMOCNICZE FUNKCJE SQL ---
 def pobierz_pozycje_skanera_z_bazy():
-    """Pobiera pozycje zrodlo='SKANER' z tabeli aktywne_pozycje"""
+    """Pobiera aktywne pozycje skanera z bazy danych"""
     try:
         db.cursor.execute("SELECT unikalne_id, symbol, cena_wejscia, czas_wejscia, max_zysk FROM aktywne_pozycje WHERE zrodlo='SKANER'")
         rows = db.cursor.fetchall()
@@ -87,48 +92,57 @@ def pobierz_pozycje_skanera_z_bazy():
         print(f"⚠️ Błąd SQL w Skanerze: {e}")
         return {}
 
-# --- [NOWOŚĆ] CZARNA LISTA SQL ---
+# --- [FIX] USZCZELNIONA CZARNA LISTA ---
 def czy_na_czarnej_liscie(symbol):
-    """Sprawdza, czy coin przyniósł stratę w ostatnich 3 dniach"""
+    """
+    Sprawdza, czy coin przyniósł stratę w ostatnich 3 dniach.
+    FIX: Uwzględnia też wpisy z NULL w dacie wyjścia (dla bezpieczeństwa).
+    """
     try:
         data_graniczna = (datetime.now() - timedelta(days=BAN_DNI)).timestamp()
-        query = "SELECT count(*) FROM historia_transakcji WHERE symbol = ? AND zysk_proc < 0 AND czas_wyjscia > ?"
+        
+        # Zapytanie szuka strat (-0.1% lub gorzej)
+        # Warunek: Data wyjścia > granica LUB Data wyjścia jest NULL (błąd zapisu = BAN)
+        query = """
+            SELECT count(*) FROM historia_transakcji 
+            WHERE symbol = ? 
+            AND zysk_proc < -0.1 
+            AND (czas_wyjscia > ? OR czas_wyjscia IS NULL)
+        """
         db.cursor.execute(query, (symbol, data_graniczna))
-        if db.cursor.fetchone()[0] > 0:
+        count = db.cursor.fetchone()[0]
+        
+        if count > 0:
             return True
         return False
-    except: return False
+    except Exception as e:
+        # W razie błędu bazy - logujemy, ale nie przerywamy działania
+        return False
 
-# --- [NOWOŚĆ] FIZYKA (PRZYSPIESZENIE) ---
+# --- FIZYKA (PRZYSPIESZENIE) ---
 def oblicz_przyspieszenie(symbol, current_price):
-    """
-    Zwraca acceleration (różnicę prędkości).
-    Jeśli > 0 -> Przyspiesza.
-    Jeśli < 0 -> Hamuje (nawet jak rośnie).
-    """
+    """Oblicza czy cena przyspiesza (acceleration > 0)"""
     teraz = time.time()
     if symbol not in historia_cen_local:
         historia_cen_local[symbol] = []
     
-    # Dodaj nową próbkę
     historia_cen_local[symbol].append({"c": current_price, "t": teraz})
-    # Trzymaj tylko ostatnie 4 minuty
+    # Trzymamy historię z 4 minut
     historia_cen_local[symbol] = [x for x in historia_cen_local[symbol] if teraz - x['t'] < 240]
     
     dane = historia_cen_local[symbol]
-    if len(dane) < 3: return 0.1 # Domyślnie lekki plus, żeby nie blokować na starcie
+    if len(dane) < 3: return 0.1 
     
-    # Szukamy ceny sprzed ~1 min i ~2 min
     p_teraz = dane[-1]['c']
     p_1min = next((x['c'] for x in reversed(dane) if teraz - x['t'] >= 60), None)
     p_2min = next((x['c'] for x in reversed(dane) if teraz - x['t'] >= 120), None)
     
     if not p_1min or not p_2min: return 0.1
     
-    v1 = ((p_teraz - p_1min) / p_1min) * 100 # Prędkość teraz
-    v2 = ((p_1min - p_2min) / p_2min) * 100 # Prędkość minutę temu
+    v1 = ((p_teraz - p_1min) / p_1min) * 100 
+    v2 = ((p_1min - p_2min) / p_2min) * 100 
     
-    return v1 - v2 # Przyspieszenie
+    return v1 - v2 
 
 # ==============================================================================
 # 🚀 GŁÓWNA PĘTLA PROGRAMU
@@ -139,7 +153,7 @@ def main():
     historia_cen = {} 
     
     print("=" * 65)
-    print(f"🚀 SKANER V10.0 (SQL+FIZYKA) START | OCHRONA: {INTERVAL_OCHRONY}s")
+    print(f"🚀 SKANER V10.3 (FIX: CENA 0.00001 + BLACKLIST) START | OCHRONA: {INTERVAL_OCHRONY}s")
     print("=" * 65)
 
     while True:
@@ -147,24 +161,22 @@ def main():
         teraz_ts = time.time()
         teraz_str = datetime.now().strftime("%H:%M:%S")
         
-        # 1. Sprawdzanie cen
         dane = get_binance_prices()
         if not dane:
             time.sleep(5)
             continue
 
-        # --- [NOWOŚĆ] AKTUALIZACJA DANYCH FIZYCZNYCH (W TLE) ---
-        # Robimy to dla wszystkich coinów z wolumenem, żeby mieć historię
+        # Aktualizacja fizyki dla coinów, które spełniają warunki
         for sym, dt in dane.items():
             try:
-                if float(dt['quoteVolume']) > MIN_VOL_24H:
+                # [FIX] Tutaj też filtrujemy cenę, żeby nie zaśmiecać pamięci BTTC
+                if float(dt['quoteVolume']) > MIN_VOL_24H and float(dt['lastPrice']) > MIN_CENA:
                     oblicz_przyspieszenie(sym, float(dt['lastPrice']))
             except: pass
-        # -------------------------------------------------------
 
         cooldowny = {k: v for k, v in cooldowny.items() if v > teraz_ts}
         
-        # --- SEKCJA A: OCHRONA POZYCJI (Z SQL) ---
+        # --- SEKCJA A: OCHRONA POZYCJI ---
         moje = pobierz_pozycje_skanera_z_bazy()
         
         for sym, info in moje.items():
@@ -184,10 +196,11 @@ def main():
             akcja = None
             powod = ""
             
-            # STRATEGIE WYJŚCIA (TWOJE)
+            # --- ZMIANA: CIASNY TRAILING STOP (0.8 zamiast 0.6) ---
             if zm < -1.8: akcja, powod = "STOP LOSS", f"Strata {zm:.2f}%"
             elif zm >= 25.0: akcja, powod = "MOONSHOT", f"Zysk {zm:.2f}%"
             elif max_z >= 1.2 and zm < 0.1: akcja, powod = "BREAK EVEN", "Ochrona kapitału"
+            # Tu jest zmiana: oddajemy tylko 20% zysku
             elif max_z >= 2.5 and zm < (max_z * 0.8): akcja, powod = "TRAILING", f"Ochrona (Max: {max_z:.1f}%)"
             elif czas_trwania >= 4 and zm < 0.2: akcja, powod = "STAGNATION", "Brak ruchu (4min)"
             elif czas_trwania >= 60: akcja, powod = "TIMEOUT", "Koniec czasu (1h)"
@@ -198,7 +211,7 @@ def main():
                 print(f"⚡ {teraz_str} | {sym} | {akcja} ({powod}) | Wynik: {kol} {zysk:.2f} USDT | Max: {max_z:.2f}%")
                 cooldowny[sym] = teraz_ts + COOLDOWN_CZAS
 
-        # --- SEKCJA B: SKANOWANIE RYNKU (Co 5 minut) ---
+        # --- SEKCJA B: SKANOWANIE RYNKU ---
         if teraz_ts - ostatni_skan_rynku >= INTERVAL_SKANOWANIA_NOWYCH:
             moje = pobierz_pozycje_skanera_z_bazy()
             moje_aktywne = {k: v for k, v in moje.items() if k not in cooldowny}
@@ -223,13 +236,15 @@ def main():
                         kol_poz = "🟢" if zm > 0 else "🔴"
                         print(f"      👉 {sym:<10} | {kol_poz} {zm:+.2f}% | Czas: {czas} min")
 
-            # Analiza rynku
             wszystkie_ruchy = []
             for sym, dt in dane.items():
                 try:
                     c = float(dt['lastPrice'])
                     v = float(dt['quoteVolume'])
-                    if v < MIN_VOL_24H: continue
+                    
+                    # [FIX] FILTR CENY - Tutaj odrzucamy śmieci jak BTTC
+                    if v < MIN_VOL_24H or c < MIN_CENA: continue
+                    
                     prev = historia_cen.get(sym, c)
                     zm = ((c - prev) / prev) * 100
                     historia_cen[sym] = c 
@@ -241,7 +256,6 @@ def main():
             if wszystkie_ruchy:
                 print(f"   🔍 ANALIZA RYNKU (Top 3 skoki):")
                 for t in wszystkie_ruchy[:3]:
-                    # Obliczamy pęd tylko dla wyświetlenia
                     acc = oblicz_przyspieszenie(t['s'], t['c'])
                     print(f"      👉 {t['s']}: +{t['z']:.2f}% (Accel: {acc:.2f})")
             else:
@@ -252,21 +266,16 @@ def main():
                 for k in wszystkie_ruchy:
                     if k['s'] in cooldowny or k['s'] in moje: continue
                     
-                    # 1. WARUNEK PODSTAWOWY: Wzrost > PRÓG (Prędkość)
                     if k['z'] >= konfig['PRÓG']:
                         
-                        # 2. [NOWOŚĆ] WARUNEK FIZYKI: Przyspieszenie > 0 (Nie hamuje)
                         acc = oblicz_przyspieszenie(k['s'], k['c'])
-                        if acc < PROG_ACCEL:
-                            # print(f"   ⚠️ Odrzucam {k['s']} (Hamuje: {acc:.2f})") # Opcjonalny debug
-                            continue
+                        if acc < PROG_ACCEL: continue
                             
-                        # 3. [NOWOŚĆ] CZARNA LISTA SQL (3 dni bana)
+                        # Sprawdzamy Blacklistę (FIXED: Uwzględnia NULL)
                         if czy_na_czarnej_liscie(k['s']):
-                            # print(f"   ⛔ Odrzucam {k['s']} (Czarna Lista)")
+                            # print(f"   ⛔ {k['s']} jest na Czarnej Liście")
                             continue
 
-                        # 4. RSI (Stary dobry filtr)
                         rsi = get_kline_rsi(k['s'])
                         if rsi < konfig['RSI']:
                             kandydaci.append({**k, 'r': rsi, 'acc': acc})
@@ -292,5 +301,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-    elif

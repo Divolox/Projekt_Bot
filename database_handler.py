@@ -6,9 +6,11 @@ import os
 DB_NAME = "baza_bota.db"
 
 class DatabaseHandler:
-    def __init__(self):
+    def __init__(self, db_name=DB_NAME):
         """Łączy się z bazą."""
-        self.conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+        self.db_name = db_name
+        # ZMIANA: Dodano timeout=10.0, aby zapobiec błędom "database is locked"
+        self.conn = sqlite3.connect(self.db_name, check_same_thread=False, timeout=10.0)
         self.cursor = self.conn.cursor()
         self._inicjalizuj_tabele()
 
@@ -21,10 +23,11 @@ class DatabaseHandler:
                 zablokowany BOOLEAN DEFAULT 0
             )
         ''')
-        if self.cursor.fetchone() is None:
-            self.cursor.execute('SELECT count(*) FROM portfel')
-            if self.cursor.fetchone()[0] == 0:
-                self.cursor.execute('INSERT INTO portfel (id, saldo_gotowka) VALUES (1, 1000.0)')
+        # Sprawdzenie czy rekord istnieje, jeśli nie - wstawienie
+        self.cursor.execute('SELECT count(*) FROM portfel WHERE id=1')
+        if self.cursor.fetchone()[0] == 0:
+            self.cursor.execute('INSERT INTO portfel (id, saldo_gotowka) VALUES (1, 1000.0)')
+            self.conn.commit()
 
         # 2. AKTYWNE POZYCJE (Z obsługą Max Zysk dla Twoich strategii)
         self.cursor.execute('''

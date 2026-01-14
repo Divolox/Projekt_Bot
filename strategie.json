@@ -1,1 +1,11 @@
-[]
+[
+  {
+    "nazwa": "ETH_TrendRide",
+    "symbol": "ETH",
+    "typ": "jednodniowa",
+    "warunek": "TREND (NEUTRALNY) RSI 49.4 + Vol 1.4x",
+    "oczekiwany_ruch": "wzrost",
+    "pewnosc": "wysoka",
+    "zrodlo": "Algorytm (Neutral)"
+  }
+]

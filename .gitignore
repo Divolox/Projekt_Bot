@@ -1,0 +1,7 @@
+baza_danych.db
+aktywne_pozycje
+historia_transakcji
+__pycache__/
+*.db
+portfel.json
+baza_bota.db-wal

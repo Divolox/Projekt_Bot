@@ -20,7 +20,7 @@ PLIK_MOZGU = "mozg.json"
 PLIK_RYNKU = "rynek.json"
 
 # LIMIT CAŁKOWITY (Bezpiecznik dla Bota Głównego)
-MAX_POZYCJI_MAIN = 3
+MAX_POZYCJI_MAIN = 6
 db = DatabaseHandler()
 
 def wczytaj_json(plik):

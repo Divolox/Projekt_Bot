@@ -5,3 +5,4 @@ __pycache__/
 *.db
 portfel.json
 baza_bota.db-wal
+baza_bota.db-shm

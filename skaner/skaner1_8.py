@@ -5,7 +5,7 @@ import os
 from datetime import datetime, timedelta
 
 # ==============================================================================
-# 🚀 SKANER 2.1 (PASOŻYT WIELORYBÓW + ZWIAD 1M + MICRO-SKANER TRANSAKCJI)
+# 🚀 SKANER HYBRYDOWY V11.8 (PANIC FILTER + BATCH LIMIT + FOMO KILLER)
 # ==============================================================================
 
 # --- 1. INTEGRACJA Z BAZĄ DANYCH ---
@@ -28,22 +28,27 @@ MIN_VOL_24H = 450000
 MIN_CENA = 0.00001 
 
 # --- USTAWIENIA ILOŚCIOWE ---
-MAX_POZYCJI_SKANERA = 10   
-MAX_KUPNO_NA_SKAN = 8      
+MAX_POZYCJI_SKANERA = 10   # Łącznie portfel mieści 10
+MAX_KUPNO_NA_SKAN = 8      # Normalnie kupujemy max 8 na raz
 
-# --- BEZPIECZNIK (FILTR PANIKI) ---
-FILTR_PANIKI_AKTYWACJA = 10  
-FILTR_PANIKI_LIMIT = 5       
+# --- NOWY BEZPIECZNIK (FILTR PANIKI) ---
+FILTR_PANIKI_AKTYWACJA = 10  # Jeśli bot widzi 10 lub więcej okazji na raz...
+FILTR_PANIKI_LIMIT = 5       # ...to kupuje tylko 5 najlepszych (żeby nie wpaść w pułapkę)
 
 INTERVAL_SKANOWANIA_NOWYCH = 300 
 INTERVAL_OCHRONY = 10            
-COOLDOWN_CZAS = 1800      
+COOLDOWN_CZAS = 1800      # 30 minut odpoczynku
 
-CFG_AGRESYWNY = { "PRÓG": 2.0, "RSI": 85, "NAZWA": "🔥 FRONTLINE (Pon-Sob)" }
-CFG_BEZPIECZNY = { "PRÓG": 2.8, "RSI": 75, "NAZWA": "🛡️ PATROL (Niedziela)" }
+# TWOJE USTAWIENIA (NIETKNIĘTE)
+CFG_AGRESYWNY = { "PRÓG": 2.0, "RSI": 85, "NAZWA": "🔥 AGRESYWNY (Pon-Sob)" }
+CFG_BEZPIECZNY = { "PRÓG": 2.8, "RSI": 75, "NAZWA": "🛡️ BEZPIECZNY (Niedziela)" }
 
 BAN_DNI = 3      
 PROG_ACCEL = 0.0 
+
+# Stałe dla HYBRYDY
+MOONSHOT_RSI_LIMIT = 98
+MOONSHOT_VOL_MULT = 3.0 
 
 historia_cen_local = {} 
 
@@ -57,22 +62,17 @@ def get_binance_prices():
         return {x['symbol']: x for x in resp if x['symbol'].endswith('USDT')}
     except: return {}
 
-# ==============================================================================
-# 👁️ DRUGIE OKO: ZWIAD BOJOWY (1-MINUTOWY)
-# ==============================================================================
-def zwiad_bojowy(symbol):
+# --- FUNKCJA ANALIZY ---
+def analiza_techniczna_smart(symbol):
     try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m&limit=15"
-        resp = requests.get(url, timeout=10).json()
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=20"
+        resp = requests.get(url, timeout=15).json()
         
-        if not resp or len(resp) < 5: return 50, 1.0, False, "Brak danych"
+        if not resp or len(resp) < 10: return 50, 1.0 
         
         closes = [float(x[4]) for x in resp]
-        opens = [float(x[1]) for x in resp]
-        highs = [float(x[2]) for x in resp]
         volumes = [float(x[5]) for x in resp]
 
-        # 1. RSI
         deltas = [closes[i+1] - closes[i] for i in range(len(closes)-1)]
         gains = [d for d in deltas if d > 0]
         losses = [-d for d in deltas if d < 0]
@@ -86,63 +86,15 @@ def zwiad_bojowy(symbol):
             rs = avg_gain / avg_loss
             rsi = 100 - (100 / (1 + rs))
 
-        # 2. Skok Wolumenu
         ostatni_vol = volumes[-1]
-        sredni_vol = sum(volumes[:-1]) / len(volumes[:-1]) if len(volumes) > 1 else 1
-        vol_ratio = ostatni_vol / sredni_vol if sredni_vol > 0 else 1.0
+        sredni_vol = sum(volumes[:-1]) / len(volumes[:-1])
+        vol_ratio = 1.0
+        if sredni_vol > 0:
+            vol_ratio = ostatni_vol / sredni_vol
 
-        # 3. DETEKCJA POLA MINOWEGO (Pułapka na leszczy)
-        ostatnie_close = closes[-1]
-        ostatnie_open = opens[-1]
-        ostatnie_high = highs[-1]
-        
-        rozmiar_swiecy = abs(ostatnie_close - ostatnie_open)
-        gorny_knot = ostatnie_high - max(ostatnie_close, ostatnie_open)
-        
-        if gorny_knot > (rozmiar_swiecy * 2.0) and rozmiar_swiecy > 0:
-            return rsi, vol_ratio, True, "KNOT ZDRADY (Dystrybucja wieloryba na szczycie)"
-            
-        if len(volumes) >= 3:
-            if volumes[-1] < volumes[-2] < volumes[-3] and closes[-1] > closes[-3]:
-                return rsi, vol_ratio, True, "DYWERGENCJA (Rośnie na pustym baku)"
+        return rsi, vol_ratio
 
-        return rsi, vol_ratio, False, "CZYSTO"
-
-    except Exception as e: 
-        return 50, 1.0, False, "Błąd zwiadu"
-
-# ==============================================================================
-# 🧠 MICRO-SKANER (BADANIE TRANSAKCJI NA ŻYWO W CIĄGU 3 SEKUND PRZED KUPNEM)
-# ==============================================================================
-def badanie_presji_transakcji(symbol):
-    try:
-        url = f"https://api.binance.com/api/v3/trades?symbol={symbol}&limit=50"
-        resp = requests.get(url, timeout=5).json()
-        
-        kupno_vol = 0
-        sprzedaz_vol = 0
-        
-        # 'isBuyerMaker': True oznacza sprzedaż do orderbooka, False oznacza KUPNO z orderbooka
-        for trade in resp:
-            vol = float(trade['qty']) * float(trade['price'])
-            if trade['isBuyerMaker']:
-                sprzedaz_vol += vol
-            else:
-                kupno_vol += vol
-                
-        total_vol = kupno_vol + sprzedaz_vol
-        if total_vol == 0: return False, "Brak obrotu"
-        
-        procent_kupna = (kupno_vol / total_vol) * 100
-        
-        # Odrzucamy, jeśli presja sprzedających w ostatnich sekundach wynosi ponad 60%
-        if procent_kupna < 40.0:
-            return True, f"PUŁAPKA (Agresywna sprzedaż: {100-procent_kupna:.0f}%)"
-        else:
-            return False, f"CZYSTO (Presja kupna: {procent_kupna:.0f}%)"
-
-    except Exception as e:
-        return False, "Brak danych z orderbooka"
+    except: return 50, 1.0
 
 # --- FIZYKA ---
 def oblicz_przyspieszenie(symbol, current_price):
@@ -191,6 +143,7 @@ def pobierz_pozycje_skanera_z_bazy():
 def czy_na_czarnej_liscie(symbol):
     try:
         data_graniczna = (datetime.now() - timedelta(days=BAN_DNI)).timestamp()
+        
         query = """
             SELECT count(*) FROM historia_transakcji 
             WHERE symbol = ? 
@@ -199,13 +152,15 @@ def czy_na_czarnej_liscie(symbol):
         """
         db.cursor.execute(query, (symbol, data_graniczna))
         count = db.cursor.fetchone()[0]
-        if count > 0: return True
+        
+        if count > 0:
+            return True
         return False
     except Exception as e:
         return False
 
 # ==============================================================================
-# 🚀 GŁÓWNA PĘTLA (WOJNA)
+# 🚀 GŁÓWNA PĘTLA
 # ==============================================================================
 def main():
     cooldowny = {} 
@@ -214,9 +169,9 @@ def main():
     
     CZARNA_LISTA_HARD = ["USDC", "FDUSD", "USDP", "TUSD", "BUSD", "EUR", "DAI"] 
 
-    print("=" * 70)
-    print(f"🚀 SKANER 2.1 (PASOŻYT WIELORYBA, ZWIAD 1M, MICRO-SKANER) START")
-    print("=" * 70)
+    print("=" * 65)
+    print(f"🚀 SKANER V11.8 (PANIC FILTER {FILTR_PANIKI_AKTYWACJA}->{FILTR_PANIKI_LIMIT}) START")
+    print("=" * 65)
 
     while True:
         konfig = pobierz_konfiguracje()
@@ -236,9 +191,7 @@ def main():
 
         cooldowny = {k: v for k, v in cooldowny.items() if v > teraz_ts}
         
-        # ==================================================================
-        # 🛡️ ZARZĄDZANIE POZYCJĄ (MENTALNOŚĆ PASOŻYTA)
-        # ==================================================================
+        # --- OCHRONA ---
         moje = pobierz_pozycje_skanera_z_bazy()
         
         for sym, info in moje.items():
@@ -258,51 +211,28 @@ def main():
             akcja = None
             powod = ""
             
-            # --- 1. ŻELAZNA TARCZA (BEZLITOSNY STOP LOSS) ---
-            if zm <= -1.5: 
-                akcja, powod = "STOP LOSS", f"Tarcza (Strata {zm:.2f}%)"
-            
-            # --- 2. BIERZ CO DAJĄ (Małe pompy) ---
-            elif max_z >= 1.5 and max_z < 3.0 and zm < (max_z - 0.6):
-                akcja, powod = "ZYSK", f"Bierz co dają (Spadek z {max_z:.2f}%)"
-                
-            # --- 3. PASOŻYT WIELORYBA (Dajemy miejsce na korektę na mocnych pompach) ---
-            elif max_z >= 3.0 and max_z < 8.0 and zm < (max_z - 1.2):
-                akcja, powod = "TRAILING", f"Wytrzepanie (Spadek z {max_z:.2f}%)"
-                
-            elif max_z >= 8.0 and max_z < 25.0 and zm < (max_z - 2.5):
-                akcja, powod = "MOON-TRAIL", f"Koniec rajdu (Spadek z {max_z:.2f}%)"
-                
-            # 🔥 CHWYTANIE ZA GARDŁO (Jeśli strzał jest ogromny, nie oddajemy kasy na 10 sekundach!)
-            elif max_z >= 25.0:
-                akcja, powod = "HARD TAKE PROFIT", f"Wycofanie na szczycie (Zysk {zm:.2f}%)"
-            
-            # --- 4. EWAKUACJA Z MARTWEGO PUNKTU ---
-            elif max_z >= 1.0 and zm <= 0.1:
-                akcja, powod = "BREAK EVEN", "Zabezpieczenie na zero"
-                
-            elif czas_trwania >= 12 and zm < 0.5: 
-                akcja, powod = "STAGNATION", "Brak paliwa (12min)"
-                
-            elif czas_trwania >= 60: 
-                akcja, powod = "TIMEOUT", "Wycofanie oddziału (1h)"
+            if zm < -1.8: akcja, powod = "STOP LOSS", f"Strata {zm:.2f}%"
+            elif zm >= 25.0: akcja, powod = "MOONSHOT", f"Zysk {zm:.2f}%"
+            elif max_z >= 0.8 and zm < 0.1: akcja, powod = "BREAK EVEN", "Ochrona kapitału"
+            elif max_z >= 1.2 and zm < (max_z - 0.3): akcja, powod = "MICRO-TRAIL", f"Zjazd z {max_z:.2f}%"
+            elif max_z >= 2.5 and zm < (max_z * 0.8): akcja, powod = "TRAILING", f"Ochrona (Max: {max_z:.1f}%)"
+            elif czas_trwania >= 9 and zm < 0.2: akcja, powod = "STAGNATION", "Brak ruchu (9min)"
+            elif czas_trwania >= 60: akcja, powod = "TIMEOUT", "Koniec czasu (1h)"
 
-            # --- EGZEKUCJA ---
             if akcja:
                 zysk = pm.zwroc_srodki(sym, act, zrodlo="SKANER", typ_strategii="skalp")
                 kol = "🟢" if zysk > 0 else "🔴"
                 print(f"⚡ {teraz_str} | {sym} | {akcja} ({powod}) | Wynik: {kol} {zysk:.2f} USDT | Max: {max_z:.2f}%")
                 cooldowny[sym] = teraz_ts + COOLDOWN_CZAS
-                print(f"   ❄️ {sym} oznaczony jako skażony na 30 min.")
+                print(f"   ❄️ {sym} zamrożony na 30 min.")
 
-        # ==================================================================
-        # 🔭 RADAR (SKANOWANIE RYNKU I ATAK)
-        # ==================================================================
+        # --- SKANOWANIE ---
         if teraz_ts - ostatni_skan_rynku >= INTERVAL_SKANOWANIA_NOWYCH:
             moje = pobierz_pozycje_skanera_z_bazy()
             moje_aktywne = {k: v for k, v in moje.items() if k not in cooldowny}
             moje_cnt = len(moje_aktywne)
             
+            # Ile mamy wolnych slotów w ogóle (do 10)
             wolne_total = MAX_POZYCJI_SKANERA - moje_cnt
             
             total = pm.oblicz_wartosc_total()            
@@ -312,7 +242,7 @@ def main():
             print(f"\n⏰ {teraz_str} | 🔄 SKAN: {konfig['NAZWA']} | Total: {total:.2f}$ ({kol}{zysk_tot:+.2f}) | Sloty: {moje_cnt}/{MAX_POZYCJI_SKANERA}")
             
             if moje_aktywne:
-                print(f"   💼 ODDZIAŁY NA FRONCIE:")
+                print(f"   💼 TWOJE POZYCJE:")
                 for sym, info in moje_aktywne.items():
                     if sym in dane:
                         act = float(dane[sym]['lastPrice'])
@@ -339,79 +269,70 @@ def main():
             
             wszystkie_ruchy.sort(key=lambda x: x['z'], reverse=True)
             
-            # 🔥 NOWY WYGLĄD RADARU (RSI I VOL W JEDNEJ LINII)
             if wszystkie_ruchy:
-                print(f"   🔍 POTENCJALNE CELE (Top 3 skoki):")
+                print(f"   🔍 ANALIZA RYNKU (Top 3 skoki):")
                 for t in wszystkie_ruchy[:3]:
                     acc = oblicz_przyspieszenie(t['s'], t['c'])
-                    rsi, vol_ratio, _, _ = zwiad_bojowy(t['s'])
-                    print(f"      👉 {t['s']:<10} | +{t['z']:>5.2f}% | Acc: {acc:>5.2f} | RSI: {rsi:>2.0f} | Vol: {vol_ratio:>3.1f}x")
+                    print(f"      👉 {t['s']}: +{t['z']:.2f}% (Accel: {acc:.2f})")
             else:
-                print("   💤 Cisza na froncie (brak skoków > 0.5%)")
+                print("   💤 Rynek śpi (brak nagłych ruchów > 0.5%)")
             
             if wolne_total > 0:
                 kandydaci = []
                 for k in wszystkie_ruchy:
                     if k['s'] in cooldowny or k['s'] in moje: continue
-                    if k['z'] > 7.5: continue 
+                    if k['z'] > 7.5: continue # FOMO KILLER
 
                     if k['z'] >= konfig['PRÓG']:
                         acc = oblicz_przyspieszenie(k['s'], k['c'])
                         if acc < PROG_ACCEL: continue
                         if czy_na_czarnej_liscie(k['s']): continue
 
-                        # 1. Zwiad 1M
-                        rsi, vol_ratio, pole_minowe, raport_zwiadu = zwiad_bojowy(k['s'])
-                        if pole_minowe:
-                            print(f"      🧨 ODRZUCONO {k['s']} (+{k['z']:.1f}%): {raport_zwiadu}")
-                            continue
-
-                        # 2. MICRO-SKANER TRANSAKCJI (Czy teraz ktoś to kupuje?)
-                        pulapka, raport_micro = badanie_presji_transakcji(k['s'])
-                        if pulapka:
-                            print(f"      🧨 ODRZUCONO {k['s']} (+{k['z']:.1f}%): {raport_micro}")
-                            continue
-
+                        rsi, vol_ratio = analiza_techniczna_smart(k['s'])
                         decyzja = False
                         powod = ""
 
                         if rsi < konfig['RSI']:
-                            decyzja, powod = True, f"Czysty rajd (RSI {rsi:.0f})"
-                        elif rsi < 95 and vol_ratio >= 2.5:
-                            decyzja, powod = True, f"Agresywna pompa (RSI {rsi:.0f}, Vol x{vol_ratio:.1f})"
+                            decyzja, powod = True, f"SAFE (RSI {rsi:.0f})"
+                        elif rsi < MOONSHOT_RSI_LIMIT and vol_ratio >= MOONSHOT_VOL_MULT:
+                            decyzja, powod = True, f"🚀 MOONSHOT (RSI {rsi:.0f}, Vol x{vol_ratio:.1f})"
 
                         if decyzja:
                             kandydaci.append({**k, 'r': rsi, 'vr': vol_ratio, 'acc': acc, 'reason': powod})
                 
                 if kandydaci:
-                    print("-" * 70)
+                    print("-" * 65)
                     
+                    # === INTELIGENTNY FILTR ZAKUPOW ===
                     ilosc_okazji = len(kandydaci)
-                    limit_tej_tury = MAX_KUPNO_NA_SKAN
+                    limit_tej_tury = MAX_KUPNO_NA_SKAN # Domyślnie 8
                     
+                    # 1. Sprawdź czy to nie podejrzana pompa (>10 okazji)
                     if ilosc_okazji >= FILTR_PANIKI_AKTYWACJA:
-                        print(f"   ⚠️ WYKRYTO SZTUCZNĄ POMPĘ RYNKOWĄ ({ilosc_okazji} celów). Biorę tylko {FILTR_PANIKI_LIMIT} najlepszych.")
+                        print(f"   ⚠️ WYKRYTO PODEJRZANĄ POMPĘ ({ilosc_okazji} okazji). Włączam filtr: Biorę tylko {FILTR_PANIKI_LIMIT} najlepszych.")
                         limit_tej_tury = FILTR_PANIKI_LIMIT
                     
+                    # 2. Dostosuj do wolnych slotów w portfelu
                     limit_ostateczny = min(wolne_total, limit_tej_tury)
+                    
                     do_kupienia = kandydaci[:limit_ostateczny]
                     
                     for k in do_kupienia:
                         sukces, il, koszt = pm.pobierz_srodki(k['s'], k['c'], 0.07, "SKANER", "skalp")
                         if sukces:
-                            print(f"🔥 {k['s']:<10} | +{k['z']:.2f}% | {k['reason']} | Acc: {k['acc']:.2f} | ATAKUJĘ")
+                            print(f"🔥 {k['s']:<10} | +{k['z']:.2f}% | {k['reason']} | Acc: {k['acc']:.2f} | KUPUJĘ")
                         else:
-                            print(f"⚠️ {k['s']} | BRAK AMUNICJI W PORTFELU")
+                            print(f"⚠️ {k['s']} | BRAK ŚRODKÓW")
                     
                     if len(kandydaci) > limit_ostateczny:
-                        print(f"   ℹ️ Utrzymano dyscyplinę: zaatakowano {limit_ostateczny} celów.")
+                        print(f"   ℹ️ Ograniczyłem zakupy do {limit_ostateczny} (Reszta odrzucona przez filtr).")
 
                 else:
-                    print(f"   ⛔ Brak czystych celów (Wymogi: Wzrost > {konfig['PRÓG']}%, Czysty wykres 1m, Czysty Orderbook).")
+                    print(f"   ⛔ Brak okazji (Wymogi: Wzrost > {konfig['PRÓG']}%, < 7.5% (FOMO), Acc > {PROG_ACCEL}).")
             else:
-                print("⛔ Oddziały w pełni rozdysponowane (10/10).")
+                print("⛔ Limit pozycji skanera osiągnięty (10/10).")
 
-            print(f"\n💤 Zwiad zakończony. Czekam 5 minut...")
+            print(f"\n💤 Czekam 5 minut na kolejny skan...")
             ostatni_skan_rynku = teraz_ts
 
         time.sleep(INTERVAL_OCHRONY)

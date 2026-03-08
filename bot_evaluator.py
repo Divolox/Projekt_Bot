@@ -5,7 +5,7 @@ import sys
 from datetime import datetime
 
 # ============================================================
-# 🛡️ BOT EVALUATOR V12.0 (SMART CLOSE + ADVANCED GHOSTS)
+# 🛡️ BOT EVALUATOR V12.0 (SMART CLOSE + WSZECHWIEDZACY DUCH)
 # ============================================================
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -15,7 +15,6 @@ if current_dir not in sys.path:
 try:
     import portfel_manager as pm
     from database_handler import DatabaseHandler
-    # Wgrywamy całą Twoją skrzynkę z narzędziami!
     from utils_data import (calc_rsi, get_trend, analizuj_dynamike_swiecy, 
                             znajdz_wsparcia_i_opory, okresl_strukture_rynku, badaj_sile_wzgledem_btc)
 except ImportError:
@@ -145,9 +144,6 @@ def main():
                     max_zysk = wynik_proc
                     db.aktualizuj_max_zysk(unikalne_id, max_zysk)
 
-                # ==========================================
-                # 👁️ WZROK BOTA (PEŁNA ANALIZA PRICE ACTION)
-                # ==========================================
                 trend = "nieznany"
                 rsi = 50.0
                 vol_ratio = 1.0
@@ -175,7 +171,6 @@ def main():
                         vol_ratio = volumeny[-1] / avg_vol if avg_vol > 0 else 0
                         rsi = calc_rsi(swiece)
                         
-                        # Nowe funkcje "oczu"
                         struktura = okresl_strukture_rynku(swiece)
                         korelacja = badaj_sile_wzgledem_btc(rynek, swiece, "1h")
                         ksztalt = analizuj_dynamike_swiecy(swiece[-1])
@@ -189,7 +184,6 @@ def main():
                 limit_display = LIMITS.get(typ_strat.split('_')[0], LIMITS["default"])
                 kolor = '🟢' if wynik_proc > 0 else '🔴'
                 
-                # Bot głośno myśli na ekranie
                 info_pa = f"Str: {struktura.split(' ')[0]}"
                 if opor and wsparcie: info_pa += f" | Opor: +{dyst_opor:.1f}% | Wsp: -{dyst_wsp:.1f}%"
                 
@@ -199,46 +193,32 @@ def main():
                 decyzja_zamkniecia = False
                 powod = ""
 
-                # ==========================================
-                # 🧠 INTELIGENTNE DECYZJE Z UŻYCIEM HIERARCHII
-                # ==========================================
-                
                 trail_dist = 0.3 * mnoznik_trail
                 if "4-godz" in typ_strat: trail_dist = 1.0 * mnoznik_trail
                 elif "jednodniowa" in typ_strat: trail_dist = 2.0 * mnoznik_trail
                 elif "tygodniowa" in typ_strat: trail_dist = 3.5 * mnoznik_trail
 
-                # --- 1. Sztywne ramy (Ultimate Backup) ---
                 if wynik_proc <= (-2.0 * mnoznik_sl) and "godz" in typ_strat: decyzja_zamkniecia = True; powod = f"Stop Loss (Krytyczny)"
                 elif wynik_proc <= (-5.0 * mnoznik_sl): decyzja_zamkniecia = True; powod = f"Stop Loss (Krytyczny)"
                 elif czas_trwania_min >= limit_display: decyzja_zamkniecia = True; powod = f"Koniec Czasu"
                 
-                # --- 2. LUDZKI INSTYNKT (Smart Close na podstawie Price Action) ---
                 elif wynik_proc > 0.5:
-                    
-                    # Scenariusz A: Wyczerpanie (Wolumen zdycha, RSI opada, struktura się łamie)
                     if vol_ratio < 0.6 and rsi < 50 and "Niedźwiedzia" in struktura:
                         decyzja_zamkniecia = True
                         powod = "Smart Close (Wyczerpanie: rynek traci siłę, ucinam)"
                         
-                    # Scenariusz B: Uderzenie w sufit (Realizacja zysków bez pazerności)
                     elif opor and dyst_opor < 0.5 and rsi > 65:
                         decyzja_zamkniecia = True
                         powod = f"Smart Take Profit (Uderzenie w opór {opor:.2f}, wycofuję się)"
                         
-                    # Scenariusz C: Pęknięcie podłogi (Prawdziwy Trailing Stop)
                     elif wsparcie and cena_akt < wsparcie:
                         decyzja_zamkniecia = True
                         powod = f"Smart Trailing (Pęknięcie wsparcia {wsparcie:.2f})"
                         
-                    # Klasyczny dynamiczny trailing (dla bezpieczeństwa, jeśli nie ma wsparcia)
                     elif max_zysk >= (trail_dist * 2) and wynik_proc < (max_zysk - trail_dist):
                         decyzja_zamkniecia = True
                         powod = f"Zabezpieczenie Zysku (Spadek z {max_zysk:.1f}%)"
 
-                # ==========================================
-                # 🛑 EGZEKUCJA I ZAPIS DUCHA (FORMALNY AUDYT)
-                # ==========================================
                 if decyzja_zamkniecia:
                     print("="*50)
                     print(f"   🔔 GŁÓWNY BOT: ZAMYKAM {symbol} [{typ_strat}]")
@@ -256,35 +236,29 @@ def main():
                         elif "Smart" in powod: decyzja_short = "SMART"
                         elif "Break" in powod or "Zabezpieczenie" in powod: decyzja_short = "BE"
                         
-                        # 💾 Kompletny, ludzki odcisk palca
-                        dane_wzorca = {
-                            "trend": trend,
-                            "rsi": rsi,
-                            "vol_ratio": vol_ratio,
-                            "sentyment": sentyment_val,
-                            "korelacja_rynku": korelacja,
-                            "stan_makro": status_rotacji,
-                            "struktura": struktura,
-                            "ksztalt_swiecy": ksztalt,
-                            "dystans_wsparcie": dyst_wsp,
-                            "dystans_opor": dyst_opor,
-                            "wynik_proc": wynik_proc,
-                            "decyzja": decyzja_short
-                        }
+                        wzorzec_id = db.dodaj_wzorzec(
+                            symbol, typ_strat, trend, rsi, vol_ratio, sentyment_val, 
+                            korelacja, status_rotacji, struktura, ksztalt, 
+                            dyst_wsp, dyst_opor, wynik_proc, decyzja_short
+                        )
                         
-                        wzorzec_id = db.dodaj_wzorzec(symbol, typ_strat, dane_wzorca)
                         czas_pozostaly = limit_display - czas_trwania_min
                         
-                        # 🔥 LOGIKA DUCHA (Odlicza resztę strategii) 🔥
-                        if decyzja_short != "TIME" and czas_pozostaly > 5:
-                            db.dodaj_ducha(wzorzec_id, symbol, typ_strat, cena_akt, czas_obserwacji_minut=czas_pozostaly)
-                            print(f"   👻 [AUDYT WŁĄCZONY] Duch przypięty do wzorca (ID:{wzorzec_id}). Bada resztę strategii: {format_czas(czas_pozostaly)}.")
+                        # LOGIKA WSZECHWIEDZĄCEGO DUCHA - WŁĄCZA SIĘ ZAWSZE O ILE ZOSTAŁO POWYŻEJ 1 MINUTY
+                        if czas_pozostaly > 1:
+                            db.dodaj_ducha(wzorzec_id, symbol, typ_strat, cena_akt, czas_pozostaly, cena_wej, max_zysk)
+                            print(f"   👻 [AUDYT WŁĄCZONY] Wszechwiedzący Duch przypięty (ID:{wzorzec_id}). Bada resztę strategii: {format_czas(czas_pozostaly)}.")
                         else:
                             roznica = max_zysk - wynik_proc
-                            if roznica >= 2.0:
+                            if max_zysk >= 1.5 and roznica >= 1.0:
                                 db.cursor.execute('UPDATE wzorce_rynkowe SET ocena_ducha = 0 WHERE id = ?', (wzorzec_id,))
+                                print(f"   📋 [NATYCHMIASTOWY AUDYT] {symbol} [{typ_strat}]: MOGŁEŚ WCZEŚNIEJ ⚠️ (Szczyt wynosił +{max_zysk:.1f}%. Oddałeś rynkowi {roznica:.1f}%)")
                             else:
                                 db.cursor.execute('UPDATE wzorce_rynkowe SET ocena_ducha = 1 WHERE id = ?', (wzorzec_id,))
+                                if wynik_proc < 0:
+                                    print(f"   📋 [NATYCHMIASTOWY AUDYT] {symbol} [{typ_strat}]: OCHRONA KAPITAŁU 🛡️ (Wyjście na -)")
+                                else:
+                                    print(f"   📋 [NATYCHMIASTOWY AUDYT] {symbol} [{typ_strat}]: STRZAŁ SNAJPERA 🎯 (Wyjście optymalne na +)")
                                 
                     except Exception as e:
                         print(f"   ⚠️ Błąd SQL Wzorca/Ducha: {e}")
@@ -304,48 +278,60 @@ def main():
                 continue
 
     # ==========================================
-    # 👻 GHOST TRACKER - AKTUALIZACJA I FORMALNE RAPORTY
+    # 👻 GHOST TRACKER - WSZECHWIEDZĄCY DUCH 
     # ==========================================
     try:
+        teraz = time.time()
         duchy = db.pobierz_aktywne_duchy()
+        
         if duchy:
             print(f"\n   👻 [GHOST TRACKER] Obserwuję {len(duchy)} zamkniętych pozycji...")
-            teraz = time.time()
-            
             for d in duchy:
                 duch_id, w_id, d_symbol, c_zamk, max_c, min_c = d
                 akt_cena_ducha = pobierz_cene(rynek, d_symbol)
                 if akt_cena_ducha > 0:
                     db.aktualizuj_ducha(duch_id, akt_cena_ducha)
                     
-            db.cursor.execute('SELECT id, wzorzec_id, symbol, typ_strategii, cena_zamkniecia, max_cena_ghost, min_cena_ghost FROM ghost_trades WHERE zakonczony = 0 AND czas_obserwacji_do <= ?', (teraz,))
-            zakonczone = db.cursor.fetchall()
+        db.cursor.execute('SELECT id, wzorzec_id, symbol, typ_strategii, cena_zamkniecia, max_cena_ghost, min_cena_ghost, cena_wejscia, max_zysk_bota FROM ghost_trades WHERE zakonczony = 0 AND czas_obserwacji_do <= ?', (teraz,))
+        zakonczone = db.cursor.fetchall()
+        
+        for zd in zakonczone:
+            d_id, w_id, sym, typ, c_zamk, max_c, min_c, c_wej, max_zysk_bota = zd
             
-            for zd in zakonczone:
-                d_id, w_id, sym, typ, c_zamk, max_c, min_c = zd
+            if c_wej == 0: c_wej = c_zamk 
+            
+            wynik_przy_zamknieciu = ((c_zamk - c_wej) / c_wej) * 100
+            max_zysk_ducha = ((max_c - c_wej) / c_wej) * 100
+            min_zysk_ducha = ((min_c - c_wej) / c_wej) * 100
+            
+            ocena = 1 
+            wniosek = ""
+            
+            prog_bledu = 1.5 if "godzinowa" in typ else (3.0 if "4-godz" in typ else 5.0)
+            
+            # SCENARIUSZ 1: WYSZLIŚMY ZA PÓŹNO (Mogłeś wcześniej!)
+            if max_zysk_bota > max_zysk_ducha and (max_zysk_bota - wynik_przy_zamknieciu) >= prog_bledu:
+                wniosek = f"MOGŁEŚ WCZEŚNIEJ ⚠️ (Szczyt to +{max_zysk_bota:.1f}% przed Twoim ucięciem. Oddałeś rynkowi {(max_zysk_bota - wynik_przy_zamknieciu):.1f}%)"
+                ocena = 0
+            
+            # SCENARIUSZ 2: WYSZLIŚMY ZA WCZEŚNIE (Mogłeś później!)
+            elif max_zysk_ducha > max_zysk_bota and (max_zysk_ducha - wynik_przy_zamknieciu) >= prog_bledu:
+                wniosek = f"MOGŁEŚ PÓŹNIEJ ❌ (Ucięto na +{wynik_przy_zamknieciu:.1f}%, a rynek poleciał potem na +{max_zysk_ducha:.1f}%)"
+                ocena = 0
+            
+            # SCENARIUSZ 3: OCALENIE KAPITAŁU (Zjazd w dół po ucięciu)
+            elif min_zysk_ducha <= (wynik_przy_zamknieciu - prog_bledu):
+                wniosek = f"DOBRA DECYZJA 🛡️ (Rynek po wyjściu spadł do {min_zysk_ducha:.1f}%. Uratowano kapitał!)"
+                ocena = 1
+            
+            # SCENARIUSZ 4: STRZAŁ SNAJPERA
+            else:
+                wniosek = f"STRZAŁ SNAJPERA 🎯 (Wyjście optymalne, rynek ustabilizował się po wyjściu)"
+                ocena = 1
                 
-                max_wzrost = ((max_c - c_zamk) / c_zamk) * 100
-                max_spadek = ((min_c - c_zamk) / c_zamk) * 100
-                
-                ocena = 1 
-                
-                # Zmienność progu w zależności od długości strategii (Tygodniówka potrzebuje więcej luzu niż godzinówka)
-                prog_bledu = 1.5 if "godzinowa" in typ else (3.0 if "4-godz" in typ else 5.0)
-                
-                if max_wzrost >= prog_bledu:
-                    wniosek = f"BŁĄD ❌ (Ucięto za wcześnie. W pozostałym czasie rynek wybił o +{max_wzrost:.1f}%)"
-                    ocena = 0 
-                elif max_spadek <= -prog_bledu:
-                    wniosek = f"SUKCES ✅ (Trafna diagnoza oporu. Uratowano kapitał przed zjazdem {max_spadek:.1f}%)"
-                elif max_wzrost > abs(max_spadek):
-                    wniosek = f"LEKKI BŁĄD ⚠️ (Odbiło na +{max_wzrost:.1f}%. Przedwczesna panika na wsparciu)"
-                    ocena = 0
-                else:
-                    wniosek = f"DOBRA DECYZJA 🛡️ (Rynek wyczerpał siłę. Ominęliśmy zjazd {max_spadek:.1f}%)"
-                    
-                print(f"   📋 [RAPORT AUDYTU] {sym} [{typ}]: {wniosek}")
-                db.zakoncz_ducha_i_ocen_wzorzec(d_id, w_id, ocena)
-                
+            print(f"   📋 [WSZECHWIEDZĄCY DUCH] {sym} [{typ}]: {wniosek}")
+            db.zakoncz_ducha_i_ocen_wzorzec(d_id, w_id, ocena)
+            
     except Exception as e:
         pass
 

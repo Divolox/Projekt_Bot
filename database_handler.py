@@ -144,10 +144,18 @@ class DatabaseHandler:
                 czas_obserwacji_do REAL, 
                 max_cena_ghost REAL,     
                 min_cena_ghost REAL,     
-                zakonczony BOOLEAN DEFAULT 0
+                zakonczony BOOLEAN DEFAULT 0,
+                cena_wejscia REAL DEFAULT 0.0,
+                max_zysk_bota REAL DEFAULT 0.0
             )
         ''')
         try: self.cursor.execute("ALTER TABLE ghost_trades ADD COLUMN wzorzec_id INTEGER")
+        except: pass
+        
+        # 🛡️ ZABEZPIECZENIE: DODANIE KOLUMN DLA WSZECHWIEDZĄCEGO DUCHA DO ISTNIEJĄCEJ TABELI
+        try: self.cursor.execute("ALTER TABLE ghost_trades ADD COLUMN cena_wejscia REAL DEFAULT 0.0")
+        except: pass
+        try: self.cursor.execute("ALTER TABLE ghost_trades ADD COLUMN max_zysk_bota REAL DEFAULT 0.0")
         except: pass
 
         self.conn.commit()
@@ -250,14 +258,16 @@ class DatabaseHandler:
         self.conn.commit()
         return self.cursor.lastrowid
 
-    def dodaj_ducha(self, wzorzec_id, symbol, typ_strategii, cena_zamkniecia, czas_obserwacji_minut):
+    def dodaj_ducha(self, wzorzec_id, symbol, typ_strategii, cena_zamkniecia, czas_obserwacji_minut, cena_wejscia=0.0, max_zysk_bota=0.0):
         """Wypuszcza Ducha przypiętego do konkretnego wzorca."""
         teraz = time.time()
         czas_do = teraz + (czas_obserwacji_minut * 60)
         self.cursor.execute('''
-            INSERT INTO ghost_trades (wzorzec_id, symbol, typ_strategii, cena_zamkniecia, czas_zamkniecia, czas_obserwacji_do, max_cena_ghost, min_cena_ghost)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (wzorzec_id, symbol, typ_strategii, cena_zamkniecia, teraz, czas_do, cena_zamkniecia, cena_zamkniecia))
+            INSERT INTO ghost_trades (
+                wzorzec_id, symbol, typ_strategii, cena_zamkniecia, czas_zamkniecia, czas_obserwacji_do, 
+                max_cena_ghost, min_cena_ghost, cena_wejscia, max_zysk_bota
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (wzorzec_id, symbol, typ_strategii, cena_zamkniecia, teraz, czas_do, cena_zamkniecia, cena_zamkniecia, cena_wejscia, max_zysk_bota))
         self.conn.commit()
 
     def pobierz_aktywne_duchy(self):

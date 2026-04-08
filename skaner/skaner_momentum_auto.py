@@ -5,7 +5,7 @@ import os
 from datetime import datetime, timedelta
 
 # ==============================================================================
-# 🚀 SKANER 2.1 (PASOŻYT WIELORYBÓW + ZWIAD 1M + MICRO-SKANER TRANSAKCJI)
+# 🚀 SKANER 3.0 (AUTO-ADAPTACJA DO SZUMU + ZWIAD 1M + BLOKADA WIELORYBÓW)
 # ==============================================================================
 
 # --- 1. INTEGRACJA Z BAZĄ DANYCH ---
@@ -44,6 +44,8 @@ CFG_BEZPIECZNY = { "PRÓG": 2.8, "RSI": 75, "NAZWA": "🛡️ PATROL (Niedziela)
 
 BAN_DNI = 3      
 PROG_ACCEL = 0.0 
+MIN_VOL_MULTI = 0.5 
+MAX_VOL_RATIO = 15.0 # 🔥 Twarda blokada na Pump&Dump (Pułapka na leszczy)
 
 historia_cen_local = {} 
 
@@ -112,7 +114,7 @@ def zwiad_bojowy(symbol):
         return 50, 1.0, False, "Błąd zwiadu"
 
 # ==============================================================================
-# 🧠 MICRO-SKANER (BADANIE TRANSAKCJI NA ŻYWO W CIĄGU 3 SEKUND PRZED KUPNEM)
+# 🧠 MICRO-SKANER (BADANIE TRANSAKCJI NA ŻYWO)
 # ==============================================================================
 def badanie_presji_transakcji(symbol):
     try:
@@ -122,7 +124,6 @@ def badanie_presji_transakcji(symbol):
         kupno_vol = 0
         sprzedaz_vol = 0
         
-        # 'isBuyerMaker': True oznacza sprzedaż do orderbooka, False oznacza KUPNO z orderbooka
         for trade in resp:
             vol = float(trade['qty']) * float(trade['price'])
             if trade['isBuyerMaker']:
@@ -135,7 +136,6 @@ def badanie_presji_transakcji(symbol):
         
         procent_kupna = (kupno_vol / total_vol) * 100
         
-        # Odrzucamy, jeśli presja sprzedających w ostatnich sekundach wynosi ponad 60%
         if procent_kupna < 40.0:
             return True, f"PUŁAPKA (Agresywna sprzedaż: {100-procent_kupna:.0f}%)"
         else:
@@ -167,6 +167,26 @@ def oblicz_przyspieszenie(symbol, current_price):
     
     return v1 - v2 
 
+# --- AUTO-ADAPTACJA (CHIRURGIA ZMIENNOŚCI) ---
+def zmierz_szum(symbol):
+    """Mierzy wibracje monety (high-low z 15 minut), żeby ustawić idealne fotele"""
+    try:
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m&limit=15"
+        resp = requests.get(url, timeout=5).json()
+        szumy = []
+        for k in resp:
+            high = float(k[2])
+            low = float(k[3])
+            if low > 0:
+                szumy.append(((high - low) / low) * 100)
+        
+        if not szumy: return 1.5
+        
+        sredni_szum = sum(szumy) / len(szumy)
+        return max(0.5, min(sredni_szum, 4.0)) # Szum w granicach racjonalności (0.5% do 4.0%)
+    except:
+        return 1.5 
+
 # --- SQL ---
 def pobierz_pozycje_skanera_z_bazy():
     try:
@@ -187,7 +207,6 @@ def pobierz_pozycje_skanera_z_bazy():
         print(f"⚠️ Błąd SQL w Skanerze: {e}")
         return {}
 
-# --- CZARNA LISTA ---
 def czy_na_czarnej_liscie(symbol):
     try:
         data_graniczna = (datetime.now() - timedelta(days=BAN_DNI)).timestamp()
@@ -211,11 +230,12 @@ def main():
     cooldowny = {} 
     ostatni_skan_rynku = 0
     historia_cen = {} 
+    cache_szumu = {} # 🧠 Pamięć foteli
     
     CZARNA_LISTA_HARD = ["USDC", "FDUSD", "USDP", "TUSD", "BUSD", "EUR", "DAI"] 
 
     print("=" * 70)
-    print(f"🚀 SKANER 2.1 (PASOŻYT WIELORYBA, ZWIAD 1M, MICRO-SKANER) START")
+    print(f"🚀 SKANER 3.0 (AUTO-ADAPTACJA + PASOŻYT WIELORYBA) START")
     print("=" * 70)
 
     while True:
@@ -237,7 +257,7 @@ def main():
         cooldowny = {k: v for k, v in cooldowny.items() if v > teraz_ts}
         
         # ==================================================================
-        # 🛡️ ZARZĄDZANIE POZYCJĄ (MENTALNOŚĆ PASOŻYTA)
+        # 🛡️ ZARZĄDZANIE POZYCJĄ (AUTO-FOTELE)
         # ==================================================================
         moje = pobierz_pozycje_skanera_z_bazy()
         
@@ -258,30 +278,43 @@ def main():
             akcja = None
             powod = ""
             
-            # --- 1. ŻELAZNA TARCZA (BEZLITOSNY STOP LOSS) ---
-            if zm <= -1.5: 
-                akcja, powod = "STOP LOSS", f"Tarcza (Strata {zm:.2f}%)"
+            # --- OBLICZANIE SZUMU ---
+            if sym not in cache_szumu or teraz_ts - cache_szumu[sym]['ts'] > 300: # Odświeża pasy co 5 min
+                cache_szumu[sym] = {'szum': zmierz_szum(sym), 'ts': teraz_ts}
             
-            # --- 2. BIERZ CO DAJĄ (Małe pompy) ---
-            elif max_z >= 1.5 and max_z < 3.0 and zm < (max_z - 0.6):
-                akcja, powod = "ZYSK", f"Bierz co dają (Spadek z {max_z:.2f}%)"
-                
-            # --- 3. PASOŻYT WIELORYBA (Dajemy miejsce na korektę na mocnych pompach) ---
-            elif max_z >= 3.0 and max_z < 8.0 and zm < (max_z - 1.2):
+            szum = cache_szumu[sym]['szum']
+            
+            # 🔥 Dynamiczne ramy cięcia:
+            stop_loss_limit = - (szum * 1.8)
+            stop_loss_limit = max(stop_loss_limit, -5.0) # Twarda podłoga, zeby nie zbankrutować
+            
+            be_trigger = szum * 1.5
+            trail_trigger = szum * 2.5
+            trail_drop = szum * 1.0
+            moon_trigger = szum * 5.0
+            moon_drop = szum * 1.8
+
+            # --- 1. ŻELAZNA TARCZA (DYNAMIC STOP LOSS) ---
+            if zm <= stop_loss_limit: 
+                akcja, powod = "STOP LOSS", f"Adaptacyjny SL (Strata {zm:.2f}%)"
+            
+            # --- 2. BIERZ CO DAJĄ ---
+            elif max_z >= trail_trigger and max_z < moon_trigger and zm < (max_z - trail_drop):
                 akcja, powod = "TRAILING", f"Wytrzepanie (Spadek z {max_z:.2f}%)"
                 
-            elif max_z >= 8.0 and max_z < 25.0 and zm < (max_z - 2.5):
+            # --- 3. MOON TRAIL ---
+            elif max_z >= moon_trigger and max_z < 25.0 and zm < (max_z - moon_drop):
                 akcja, powod = "MOON-TRAIL", f"Koniec rajdu (Spadek z {max_z:.2f}%)"
                 
-            # 🔥 CHWYTANIE ZA GARDŁO (Jeśli strzał jest ogromny, nie oddajemy kasy na 10 sekundach!)
-            elif max_z >= 25.0:
+            # 🔥 CHWYTANIE ZA GARDŁO (Sztywne, nie bawimy sie w szum przy gigantycznych zyskach)
+            elif max_z >= 25.0 and zm < (max_z - 3.0):
                 akcja, powod = "HARD TAKE PROFIT", f"Wycofanie na szczycie (Zysk {zm:.2f}%)"
             
             # --- 4. EWAKUACJA Z MARTWEGO PUNKTU ---
-            elif max_z >= 1.0 and zm <= 0.1:
+            elif max_z >= be_trigger and zm <= 0.2:
                 akcja, powod = "BREAK EVEN", "Zabezpieczenie na zero"
                 
-            elif czas_trwania >= 12 and zm < 0.5: 
+            elif czas_trwania >= 12 and zm < 1.0: 
                 akcja, powod = "STAGNATION", "Brak paliwa (12min)"
                 
             elif czas_trwania >= 60: 
@@ -339,7 +372,6 @@ def main():
             
             wszystkie_ruchy.sort(key=lambda x: x['z'], reverse=True)
             
-            # 🔥 NOWY WYGLĄD RADARU (RSI I VOL W JEDNEJ LINII)
             if wszystkie_ruchy:
                 print(f"   🔍 POTENCJALNE CELE (Top 3 skoki):")
                 for t in wszystkie_ruchy[:3]:
@@ -366,7 +398,7 @@ def main():
                             print(f"      🧨 ODRZUCONO {k['s']} (+{k['z']:.1f}%): {raport_zwiadu}")
                             continue
 
-                        # 2. MICRO-SKANER TRANSAKCJI (Czy teraz ktoś to kupuje?)
+                        # 2. MICRO-SKANER TRANSAKCJI
                         pulapka, raport_micro = badanie_presji_transakcji(k['s'])
                         if pulapka:
                             print(f"      🧨 ODRZUCONO {k['s']} (+{k['z']:.1f}%): {raport_micro}")
@@ -375,7 +407,10 @@ def main():
                         decyzja = False
                         powod = ""
 
-                        if rsi < konfig['RSI']:
+                        # 🔥 BLOKADA NA BOTY WIELORYBÓW (PUMP & DUMP) - Nie wchodzimy na puste sztuczne pompy
+                        if vol_ratio > MAX_VOL_RATIO:
+                            decyzja, powod = False, f"Zbyt duża anomalia (Vol > {MAX_VOL_RATIO}x) - Sztuczna pompa!"
+                        elif rsi < konfig['RSI']:
                             decyzja, powod = True, f"Czysty rajd (RSI {rsi:.0f})"
                         elif rsi < 95 and vol_ratio >= 2.5:
                             decyzja, powod = True, f"Agresywna pompa (RSI {rsi:.0f}, Vol x{vol_ratio:.1f})"

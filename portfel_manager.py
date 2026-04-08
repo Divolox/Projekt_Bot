@@ -16,11 +16,12 @@ API_SECRET = 'TWÓJ_SECRET_BINANCE' # Pamiętaj żeby usunąć potem dając do r
 # -----------------------------------------------------
 
 # ----------------- USTAWIENIA TELEGRAM -----------------
-TELEGRAM_TOKEN = "TUTAJ_WKLEJ_TOKEN_OD_BOTFATHERA"
-TELEGRAM_CHAT_ID = "TUTAJ_WKLEJ_SWOJ_CHAT_ID"
+TELEGRAM_TOKEN = "8423220609:AAE6yrPVGS7Fv2vIgkbiKWhTINMRlA_F__s"
+TELEGRAM_CHAT_ID = "8639573942"
 
 def wyslij_powiadomienie(wiadomosc):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID or TELEGRAM_TOKEN == "TUTAJ_WKLEJ_TOKEN_OD_BOTFATHERA": return
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: 
+        return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         payload = {
@@ -31,7 +32,6 @@ def wyslij_powiadomienie(wiadomosc):
         requests.post(url, data=payload, timeout=5)
     except Exception as e:
         print(f"⚠️ Błąd wysyłania na Telegram: {e}")
-# -----------------------------------------------------
 
 # Import biblioteki Binance (tylko jeśli zainstalowana)
 try:
@@ -66,6 +66,9 @@ try:
     from database_handler import DatabaseHandler
     db = DatabaseHandler() # Połączenie z bazą
     print("✅ Portfel połączony z bazą SQLite.")
+
+    print("🚀 [DEBUG] ZAŁADOWANO NOWY PORTFEL Z TELEGRAMEM!")
+
 except ImportError:
     print("❌ BŁĄD KRYTYCZNY: Brak pliku database_handler.py!")
     sys.exit()

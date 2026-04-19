@@ -5,7 +5,7 @@ import os
 from datetime import datetime, timedelta
 
 # ==============================================================================
-# 🚀 SKANER 3.0 (AUTO-ADAPTACJA DO SZUMU + ZWIAD 1M + BLOKADA WIELORYBÓW)
+# 🚀 SKANER 4.0 (INTELIGENTNY RADAR + ŻELAZNA TARCZA + BLOKADA WIELORYBÓW)
 # ==============================================================================
 
 # --- 1. INTEGRACJA Z BAZĄ DANYCH ---
@@ -44,7 +44,7 @@ CFG_BEZPIECZNY = { "PRÓG": 2.8, "RSI": 75, "NAZWA": "🛡️ PATROL (Niedziela)
 
 BAN_DNI = 3      
 PROG_ACCEL = 0.0 
-MIN_VOL_MULTI = 0.5 
+MIN_VOL_MULTI = 0.5 # 🔥 Odzyskana tarcza na puste pompy
 MAX_VOL_RATIO = 15.0 # 🔥 Twarda blokada na Pump&Dump (Pułapka na leszczy)
 
 historia_cen_local = {} 
@@ -167,26 +167,6 @@ def oblicz_przyspieszenie(symbol, current_price):
     
     return v1 - v2 
 
-# --- AUTO-ADAPTACJA (CHIRURGIA ZMIENNOŚCI) ---
-def zmierz_szum(symbol):
-    """Mierzy wibracje monety (high-low z 15 minut), żeby ustawić idealne fotele"""
-    try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m&limit=15"
-        resp = requests.get(url, timeout=5).json()
-        szumy = []
-        for k in resp:
-            high = float(k[2])
-            low = float(k[3])
-            if low > 0:
-                szumy.append(((high - low) / low) * 100)
-        
-        if not szumy: return 1.5
-        
-        sredni_szum = sum(szumy) / len(szumy)
-        return max(0.5, min(sredni_szum, 4.0)) # Szum w granicach racjonalności (0.5% do 4.0%)
-    except:
-        return 1.5 
-
 # --- SQL ---
 def pobierz_pozycje_skanera_z_bazy():
     try:
@@ -230,12 +210,11 @@ def main():
     cooldowny = {} 
     ostatni_skan_rynku = 0
     historia_cen = {} 
-    cache_szumu = {} # 🧠 Pamięć foteli
     
     CZARNA_LISTA_HARD = ["USDC", "FDUSD", "USDP", "TUSD", "BUSD", "EUR", "DAI"] 
 
     print("=" * 70)
-    print(f"🚀 SKANER 3.0 (AUTO-ADAPTACJA + PASOŻYT WIELORYBA) START")
+    print(f"🚀 SKANER 4.0 (INTELIGENTNY RADAR + ŻELAZNA TARCZA) START")
     print("=" * 70)
 
     while True:
@@ -257,7 +236,7 @@ def main():
         cooldowny = {k: v for k, v in cooldowny.items() if v > teraz_ts}
         
         # ==================================================================
-        # 🛡️ ZARZĄDZANIE POZYCJĄ (AUTO-FOTELE)
+        # 🛡️ ZARZĄDZANIE POZYCJĄ (ŻELAZNA TARCZA Z TERMUXA)
         # ==================================================================
         moje = pobierz_pozycje_skanera_z_bazy()
         
@@ -277,47 +256,30 @@ def main():
             czas_trwania = int((teraz_ts - info.get('czas_zakupu', teraz_ts)) / 60)
             akcja = None
             powod = ""
-            
-            # --- OBLICZANIE SZUMU ---
-            if sym not in cache_szumu or teraz_ts - cache_szumu[sym]['ts'] > 300: # Odświeża pasy co 5 min
-                cache_szumu[sym] = {'szum': zmierz_szum(sym), 'ts': teraz_ts}
-            
-            szum = cache_szumu[sym]['szum']
-            
-            # 🔥 Dynamiczne ramy cięcia:
-            stop_loss_limit = - (szum * 1.8)
-            stop_loss_limit = max(stop_loss_limit, -5.0) # Twarda podłoga, zeby nie zbankrutować
-            
-            be_trigger = szum * 1.5
-            trail_trigger = szum * 2.5
-            trail_drop = szum * 1.0
-            moon_trigger = szum * 5.0
-            moon_drop = szum * 1.8
 
-            # --- 1. ŻELAZNA TARCZA (DYNAMIC STOP LOSS) ---
-            if zm <= stop_loss_limit: 
-                akcja, powod = "STOP LOSS", f"Adaptacyjny SL (Strata {zm:.2f}%)"
-            
-            # --- 2. BIERZ CO DAJĄ ---
-            elif max_z >= trail_trigger and max_z < moon_trigger and zm < (max_z - trail_drop):
+            # --- TWOJE ORYGINALNE, TWARDE REGUŁY BOJOWE Z TERMUXA ---
+            if zm <= -1.5:
+                akcja, powod = "STOP LOSS", f"Tarcza (Strata {zm:.2f}%)"
+
+            elif max_z >= 1.5 and max_z < 3.0 and zm < (max_z - 0.7):
+                akcja, powod = "ZYSK", f"Bierz co dają (Spadek z {max_z:.2f}%)"
+
+            elif max_z >= 3.0 and max_z < 8.0 and zm < (max_z - 1.2):
                 akcja, powod = "TRAILING", f"Wytrzepanie (Spadek z {max_z:.2f}%)"
-                
-            # --- 3. MOON TRAIL ---
-            elif max_z >= moon_trigger and max_z < 25.0 and zm < (max_z - moon_drop):
+
+            elif max_z >= 8.0 and max_z < 25.0 and zm < (max_z - 2.0):
                 akcja, powod = "MOON-TRAIL", f"Koniec rajdu (Spadek z {max_z:.2f}%)"
-                
-            # 🔥 CHWYTANIE ZA GARDŁO (Sztywne, nie bawimy sie w szum przy gigantycznych zyskach)
+
             elif max_z >= 25.0 and zm < (max_z - 3.0):
                 akcja, powod = "HARD TAKE PROFIT", f"Wycofanie na szczycie (Zysk {zm:.2f}%)"
-            
-            # --- 4. EWAKUACJA Z MARTWEGO PUNKTU ---
-            elif max_z >= be_trigger and zm <= 0.2:
+
+            elif max_z >= 1.0 and zm <= 0.1:
                 akcja, powod = "BREAK EVEN", "Zabezpieczenie na zero"
-                
-            elif czas_trwania >= 12 and zm < 1.0: 
+
+            elif czas_trwania >= 12 and zm < 0.5:
                 akcja, powod = "STAGNATION", "Brak paliwa (12min)"
-                
-            elif czas_trwania >= 60: 
+
+            elif czas_trwania >= 60:
                 akcja, powod = "TIMEOUT", "Wycofanie oddziału (1h)"
 
             # --- EGZEKUCJA ---
@@ -337,22 +299,9 @@ def main():
             moje_cnt = len(moje_aktywne)
             
             wolne_total = MAX_POZYCJI_SKANERA - moje_cnt
-            
             total = pm.oblicz_wartosc_total()            
             zysk_tot = total - 1000.00
             kol = "🟢" if zysk_tot >= 0 else "🔴"
-
-            print(f"\n⏰ {teraz_str} | 🔄 SKAN: {konfig['NAZWA']} | Total: {total:.2f}$ ({kol}{zysk_tot:+.2f}) | Sloty: {moje_cnt}/{MAX_POZYCJI_SKANERA}")
-            
-            if moje_aktywne:
-                print(f"   💼 ODDZIAŁY NA FRONCIE:")
-                for sym, info in moje_aktywne.items():
-                    if sym in dane:
-                        act = float(dane[sym]['lastPrice'])
-                        zm = ((act - info['cena_wejscia']) / info['cena_wejscia']) * 100
-                        czas = int((teraz_ts - info.get('czas_zakupu', teraz_ts)) / 60)
-                        kol_poz = "🟢" if zm > 0 else "🔴"
-                        print(f"      👉 {sym:<10} | {kol_poz} {zm:+.2f}% | Czas: {czas} min")
 
             wszystkie_ruchy = []
             for sym, dt in dane.items():
@@ -372,6 +321,35 @@ def main():
             
             wszystkie_ruchy.sort(key=lambda x: x['z'], reverse=True)
             
+            # 🔥 INTELIGENTNY RADAR FRONTU (Adaptacja Prógów)
+            skoki_powyzej_1 = sum(1 for k in wszystkie_ruchy if k['z'] >= 1.0)
+            
+            if datetime.today().weekday() == 6:
+                dynamiczny_prog = 2.8
+                stan_rynku_opis = f"🛡️ PATROL (Niedziela) | Aktywne pompy >1%: {skoki_powyzej_1} | Próg: {dynamiczny_prog}%"
+            elif skoki_powyzej_1 >= 15:
+                dynamiczny_prog = 2.0
+                stan_rynku_opis = f"🔥 ZIELONY FRONT (Mocny trend) | Aktywne pompy >1%: {skoki_powyzej_1} | Próg: {dynamiczny_prog}%"
+            elif skoki_powyzej_1 >= 5:
+                dynamiczny_prog = 2.4
+                stan_rynku_opis = f"⚠️ SZUM RYNKOWY (Umiarkowana siła) | Aktywne pompy >1%: {skoki_powyzej_1} | Próg: {dynamiczny_prog}%"
+            else:
+                dynamiczny_prog = 2.8
+                stan_rynku_opis = f"💀 RZEŹNIA (Brak paliwa na rynku) | Aktywne pompy >1%: {skoki_powyzej_1} | Próg: {dynamiczny_prog}%"
+
+            print(f"\n⏰ {teraz_str} | 🔄 SKAN: {stan_rynku_opis}")
+            print(f"   💰 Total: {total:.2f}$ ({kol}{zysk_tot:+.2f}) | Sloty: {moje_cnt}/{MAX_POZYCJI_SKANERA}")
+            
+            if moje_aktywne:
+                print(f"   💼 ODDZIAŁY NA FRONCIE:")
+                for sym, info in moje_aktywne.items():
+                    if sym in dane:
+                        act = float(dane[sym]['lastPrice'])
+                        zm = ((act - info['cena_wejscia']) / info['cena_wejscia']) * 100
+                        czas = int((teraz_ts - info.get('czas_zakupu', teraz_ts)) / 60)
+                        kol_poz = "🟢" if zm > 0 else "🔴"
+                        print(f"      👉 {sym:<10} | {kol_poz} {zm:+.2f}% | Czas: {czas} min")
+            
             if wszystkie_ruchy:
                 print(f"   🔍 POTENCJALNE CELE (Top 3 skoki):")
                 for t in wszystkie_ruchy[:3]:
@@ -387,7 +365,7 @@ def main():
                     if k['s'] in cooldowny or k['s'] in moje: continue
                     if k['z'] > 7.5: continue 
 
-                    if k['z'] >= konfig['PRÓG']:
+                    if k['z'] >= dynamiczny_prog:
                         acc = oblicz_przyspieszenie(k['s'], k['c'])
                         if acc < PROG_ACCEL: continue
                         if czy_na_czarnej_liscie(k['s']): continue
@@ -407,9 +385,11 @@ def main():
                         decyzja = False
                         powod = ""
 
-                        # 🔥 BLOKADA NA BOTY WIELORYBÓW (PUMP & DUMP) - Nie wchodzimy na puste sztuczne pompy
+                        # 🔥 BLOKADA NA BOTY WIELORYBÓW I PUSTE POMPY
                         if vol_ratio > MAX_VOL_RATIO:
                             decyzja, powod = False, f"Zbyt duża anomalia (Vol > {MAX_VOL_RATIO}x) - Sztuczna pompa!"
+                        elif vol_ratio < MIN_VOL_MULTI:
+                            decyzja, powod = False, f"Pusta pompa (Vol < {MIN_VOL_MULTI}x) - Brak paliwa!"
                         elif rsi < konfig['RSI']:
                             decyzja, powod = True, f"Czysty rajd (RSI {rsi:.0f})"
                         elif rsi < 95 and vol_ratio >= 2.5:
@@ -442,7 +422,7 @@ def main():
                         print(f"   ℹ️ Utrzymano dyscyplinę: zaatakowano {limit_ostateczny} celów.")
 
                 else:
-                    print(f"   ⛔ Brak czystych celów (Wymogi: Wzrost > {konfig['PRÓG']}%, Czysty wykres 1m, Czysty Orderbook).")
+                    print(f"   ⛔ Brak czystych celów (Wymogi: Wzrost > {dynamiczny_prog}%, Czysty wykres 1m, Czysty Orderbook).")
             else:
                 print("⛔ Oddziały w pełni rozdysponowane (10/10).")
 

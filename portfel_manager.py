@@ -6,7 +6,7 @@ import math
 import requests  # <-- Dodany moduł do Telegrama
 
 # ============================================================
-# 💰 PORTFEL MANAGER V11.1 (LIVE BINANCE + HYBRYDA + TELEGRAM)
+# 💰 PORTFEL MANAGER V11.2 (LIVE BINANCE + HYBRYDA + AUTO-SYNC)
 # ============================================================
 
 # ----------------- USTAWIENIA GIEŁDY -----------------
@@ -16,8 +16,8 @@ API_SECRET = 'TWÓJ_SECRET_BINANCE' # Pamiętaj żeby usunąć potem dając do r
 # -----------------------------------------------------
 
 # ----------------- USTAWIENIA TELEGRAM -----------------
-TELEGRAM_TOKEN = "8423220609:AAE6yrPVGS7Fv2vIgkbiKWhTINMRlA_F__s"
-TELEGRAM_CHAT_ID = "8639573942"
+TELEGRAM_TOKEN = "."
+TELEGRAM_CHAT_ID = "."
 
 def wyslij_powiadomienie(wiadomosc):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: 
@@ -51,6 +51,7 @@ if TRYB_REAL and BINANCE_READY:
     except Exception as e:
         print(f"❌ [PORTFEL KRYTYCZNY] Błąd połączenia z Binance: {e}")
         TRYB_REAL = False
+        client = None
 else:
     client = None
     print("🛡️ [PORTFEL] Tryb SYMULACJI (Paper Trading) - Prawdziwe zlecenia wyłączone.")
@@ -93,6 +94,30 @@ def migruj_z_jsona():
         except: pass
 
 migruj_z_jsona()
+
+# --- AUTO-SYNCHRONIZACJA Z BINANCE ---
+def synchronizuj_saldo_z_binance():
+    if TRYB_REAL and client:
+        try:
+            # Pobierz stan portfela z giełdy (wolne środki USDT)
+            balance = client.get_asset_balance(asset='USDT')
+            realne_usdt = float(balance['free'])
+            
+            # Pobierz to, co mamy w bazie
+            obecne_db = db.pobierz_saldo()[0]
+            
+            # Korygujemy bazę o różnicę, by zgadzała się co do centa z Binance
+            if abs(realne_usdt - obecne_db) > 0.01:
+                roznica = realne_usdt - obecne_db
+                db.aktualizuj_saldo(roznica)
+                print(f"🔄 [SYNCHRONIZACJA] Zaktualizowano saldo w bazie na podstawie Binance: {realne_usdt:.2f} USDT")
+            else:
+                print(f"✅ [SYNCHRONIZACJA] Saldo w bazie SQL zgadza się z Binance: {realne_usdt:.2f} USDT")
+        except Exception as e:
+            print(f"⚠️ [BŁĄD SYNCHRONIZACJI] Nie udało się pobrać salda z Binance: {e}")
+
+# Uruchom synchronizację przy starcie
+synchronizuj_saldo_z_binance()
 # -------------------------------------------
 
 PLIK_RYNKU = "rynek.json"

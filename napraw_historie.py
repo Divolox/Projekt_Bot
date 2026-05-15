@@ -1,28 +1,21 @@
-import sqlite3
-import os
+from database_handler import DatabaseHandler
 
-DB_NAME = "baza_bota.db"
 
 def napraw_baze():
-    if not os.path.exists(DB_NAME):
-        print(f"❌ Błąd: Nie widzę pliku {DB_NAME}. Upewnij się, że jesteś w folderze bot_sql!")
-        return
-
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
+    db = DatabaseHandler()
+    cursor = db.cursor
 
     print("🔧 Sprawdzam tabelę 'historia_transakcji'...")
 
-    # 1. Sprawdź czy tabela istnieje
     try:
         cursor.execute("SELECT count(*) FROM historia_transakcji")
         count = cursor.fetchone()[0]
         print(f"✅ Tabela istnieje. Liczba wpisów: {count}")
-    except sqlite3.OperationalError:
+    except Exception:
         print("⚠️ Tabela NIE istnieje. Tworzę ją...")
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS historia_transakcji (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 symbol TEXT,
                 typ_strategii TEXT,
                 cena_wejscia REAL,
@@ -35,14 +28,16 @@ def napraw_baze():
                 powod_wyjscia TEXT
             )
         """)
-        conn.commit()
+        db.conn.commit()
         print("✅ Utworzono tabelę 'historia_transakcji'.")
 
-    # 2. Sprawdź czy są odpowiednie kolumny (ważne dla Czarnej Listy!)
-    # Potrzebujemy: symbol, zysk_proc, czas_wyjscia
-    cursor.execute("PRAGMA table_info(historia_transakcji)")
-    kolumny = [row[1] for row in cursor.fetchall()]
-    
+    cursor.execute("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'historia_transakcji'
+        ORDER BY ordinal_position
+    """)
+    kolumny = [row[0] for row in cursor.fetchall()]
+
     wymagane = ["symbol", "zysk_proc", "czas_wyjscia"]
     brakujace = [k for k in wymagane if k not in kolumny]
 
@@ -51,17 +46,15 @@ def napraw_baze():
         print("🔧 Dodaję brakujące kolumny...")
         for k in brakujace:
             try:
-                # Domyślny typ REAL dla liczb, TEXT dla innych (tu upraszczam)
-                typ = "REAL"
+                typ = "REAL" if k != "powod_wyjscia" else "TEXT"
                 cursor.execute(f"ALTER TABLE historia_transakcji ADD COLUMN {k} {typ}")
                 print(f"   -> Dodano kolumnę: {k}")
             except Exception as e:
                 print(f"   -> Błąd przy dodawaniu {k}: {e}")
-        conn.commit()
+        db.conn.commit()
     else:
         print("✅ Wszystkie wymagane kolumny są na miejscu.")
 
-    # 3. Testowy odczyt (Symulacja Czarnej Listy)
     try:
         cursor.execute("SELECT count(*) FROM historia_transakcji WHERE zysk_proc < 0")
         stratne = cursor.fetchone()[0]
@@ -69,8 +62,9 @@ def napraw_baze():
     except Exception as e:
         print(f"❌ Błąd testu zapytania: {e}")
 
-    conn.close()
+    db.close()
     print("🏁 Naprawa zakończona.")
+
 
 if __name__ == "__main__":
     napraw_baze()

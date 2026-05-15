@@ -1,30 +1,19 @@
-import sqlite3
-import os
+from database_handler import DatabaseHandler
 
-DB_NAME = "baza_bota.db"
 
 def main():
-    if not os.path.exists(DB_NAME):
-        print("❌ Brak bazy danych!")
-        return
-
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-
-    # Sprawdź obecne saldo
+    db = DatabaseHandler()
     try:
-        cursor.execute("SELECT saldo_gotowka FROM portfel WHERE id=1")
-        wynik = cursor.fetchone()
+        db.cursor.execute("SELECT saldo_gotowka FROM portfel WHERE id=1")
+        wynik = db.cursor.fetchone()
         if not wynik:
             print("❌ Tabela portfel jest pusta!")
             return
         obecne = wynik[0]
         print(f"💰 Obecne saldo gotówki w bazie: {obecne:.2f} USDT")
 
-        # Sprawdź aktywne pozycje
-        # POPRAWKA: Pobieramy cena_wejscia zamiast nieistniejącej wartosc_wejscia
-        cursor.execute("SELECT symbol, ilosc, cena_wejscia FROM aktywne_pozycje")
-        pozycje = cursor.fetchall()
+        db.cursor.execute("SELECT symbol, ilosc, cena_wejscia FROM aktywne_pozycje")
+        pozycje = db.cursor.fetchall()
         
         print(f"\n📦 Aktywne pozycje w bazie ({len(pozycje)}):")
         for p in pozycje:
@@ -39,14 +28,15 @@ def main():
         nowe_saldo_str = input(f"Podaj NOWE poprawne saldo gotówki (np. {obecne + 100:.2f}): ")
         
         nowe_float = float(nowe_saldo_str.replace(",", "."))
-        cursor.execute("UPDATE portfel SET saldo_gotowka = ? WHERE id=1", (nowe_float,))
-        conn.commit()
+        db.cursor.execute("UPDATE portfel SET saldo_gotowka = %s WHERE id=1", (nowe_float,))
+        db.conn.commit()
         print(f"✅ SUKCES! Zaktualizowano saldo na: {nowe_float:.2f} USDT")
         
     except Exception as e:
         print(f"❌ Wystąpił błąd: {e}")
-    
-    conn.close()
+    finally:
+        db.close()
+
 
 if __name__ == "__main__":
     main()

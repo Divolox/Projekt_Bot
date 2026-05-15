@@ -5,10 +5,9 @@ import os
 from datetime import datetime, timedelta
 
 # ==============================================================================
-# 🚀 SKANER 4.0 (INTELIGENTNY RADAR + ŻELAZNA TARCZA + BLOKADA WIELORYBÓW)
+# 🚀 SKANER 4.1 + MATADOR (ORDER BOOK X-RAY) + SPREAD SHIELD
 # ==============================================================================
 
-# --- 1. INTEGRACJA Z BAZĄ DANYCH ---
 current_dir = os.path.dirname(os.path.abspath(__file__)) 
 parent_dir = os.path.dirname(current_dir)              
 sys.path.append(parent_dir)
@@ -23,34 +22,28 @@ except ImportError:
 
 db = DatabaseHandler()
 
-# --- 2. KONFIGURACJA STRATEGII ---
+# --- KONFIGURACJA STRATEGII ---
 MIN_VOL_24H = 450000 
 MIN_CENA = 0.00001 
 
-# --- USTAWIENIA ILOŚCIOWE ---
 MAX_POZYCJI_SKANERA = 10   
 MAX_KUPNO_NA_SKAN = 8      
-
-# --- BEZPIECZNIK (FILTR PANIKI) ---
 FILTR_PANIKI_AKTYWACJA = 10  
 FILTR_PANIKI_LIMIT = 5       
 
 INTERVAL_SKANOWANIA_NOWYCH = 300 
-INTERVAL_OCHRONY = 10            
+INTERVAL_OCHRONY = 5  
 COOLDOWN_CZAS = 1800      
 
-CFG_AGRESYWNY = { "PRÓG": 2.0, "RSI": 85, "NAZWA": "🔥 FRONTLINE (Pon-Sob)" }
-CFG_BEZPIECZNY = { "PRÓG": 2.8, "RSI": 75, "NAZWA": "🛡️ PATROL (Niedziela)" }
+CFG_RSI = 85
+CFG_RSI_NIEDZIELA = 75
 
 BAN_DNI = 3      
 PROG_ACCEL = 0.0 
-MIN_VOL_MULTI = 0.5 # 🔥 Odzyskana tarcza na puste pompy
-MAX_VOL_RATIO = 15.0 # 🔥 Twarda blokada na Pump&Dump (Pułapka na leszczy)
+MIN_VOL_MULTI = 0.5 
+MAX_VOL_RATIO = 15.0 
 
 historia_cen_local = {} 
-
-def pobierz_konfiguracje():
-    return CFG_BEZPIECZNY if datetime.today().weekday() == 6 else CFG_AGRESYWNY
 
 def get_binance_prices():
     try:
@@ -74,7 +67,6 @@ def zwiad_bojowy(symbol):
         highs = [float(x[2]) for x in resp]
         volumes = [float(x[5]) for x in resp]
 
-        # 1. RSI
         deltas = [closes[i+1] - closes[i] for i in range(len(closes)-1)]
         gains = [d for d in deltas if d > 0]
         losses = [-d for d in deltas if d < 0]
@@ -88,12 +80,10 @@ def zwiad_bojowy(symbol):
             rs = avg_gain / avg_loss
             rsi = 100 - (100 / (1 + rs))
 
-        # 2. Skok Wolumenu
         ostatni_vol = volumes[-1]
         sredni_vol = sum(volumes[:-1]) / len(volumes[:-1]) if len(volumes) > 1 else 1
         vol_ratio = ostatni_vol / sredni_vol if sredni_vol > 0 else 1.0
 
-        # 3. DETEKCJA POLA MINOWEGO (Pułapka na leszczy)
         ostatnie_close = closes[-1]
         ostatnie_open = opens[-1]
         ostatnie_high = highs[-1]
@@ -114,11 +104,11 @@ def zwiad_bojowy(symbol):
         return 50, 1.0, False, "Błąd zwiadu"
 
 # ==============================================================================
-# 🧠 MICRO-SKANER (BADANIE TRANSAKCJI NA ŻYWO)
+# 🧠 MICRO-SKANER TRANSAKCJI
 # ==============================================================================
 def badanie_presji_transakcji(symbol):
     try:
-        url = f"https://api.binance.com/api/v3/trades?symbol={symbol}&limit=50"
+        url = f"https://api.binance.com/api/v3/trades?symbol={symbol}&limit=500"
         resp = requests.get(url, timeout=5).json()
         
         kupno_vol = 0
@@ -136,7 +126,7 @@ def badanie_presji_transakcji(symbol):
         
         procent_kupna = (kupno_vol / total_vol) * 100
         
-        if procent_kupna < 40.0:
+        if procent_kupna < 20.0:
             return True, f"PUŁAPKA (Agresywna sprzedaż: {100-procent_kupna:.0f}%)"
         else:
             return False, f"CZYSTO (Presja kupna: {procent_kupna:.0f}%)"
@@ -144,7 +134,58 @@ def badanie_presji_transakcji(symbol):
     except Exception as e:
         return False, "Brak danych z orderbooka"
 
-# --- FIZYKA ---
+# ==============================================================================
+# 🛡️ NOWOŚĆ: MATADOR (SKANER PANCERZA ORDER BOOK)
+# ==============================================================================
+def skaner_pancerza(symbol, current_price):
+    try:
+        url = f"https://api.binance.com/api/v3/depth?symbol={symbol}&limit=100"
+        resp = requests.get(url, timeout=5).json()
+        
+        bids = resp.get('bids', [])
+        asks = resp.get('asks', [])
+        
+        if not bids or not asks:
+            return False, "Brak danych z Order Booka"
+            
+        # Skanujemy 1.5% w dół (Wsparcie) i 1.5% w górę (Opór)
+        dolna_granica = current_price * 0.985
+        gorna_granica = current_price * 1.015
+        
+        vol_wsparcia = 0.0
+        for b in bids:
+            price = float(b[0])
+            qty = float(b[1])
+            if price >= dolna_granica:
+                vol_wsparcia += (price * qty)
+            else:
+                break # Bids są posortowane malejąco
+                
+        vol_oporu = 0.0
+        for a in asks:
+            price = float(a[0])
+            qty = float(a[1])
+            if price <= gorna_granica:
+                vol_oporu += (price * qty)
+            else:
+                break # Asks są posortowane rosnąco
+                
+        if vol_wsparcia == 0: vol_wsparcia = 1.0 
+        
+        stosunek = vol_oporu / vol_wsparcia
+        
+        # 1. Sprawdzamy czy przed nami nie ma betonowej ściany (3x więcej kapitału na sprzedaż)
+        if stosunek > 3.0:
+            return True, f"BETONOWA ŚCIANA (Sprzedaż {stosunek:.1f}x większa od wsparcia)"
+            
+        # 2. Sprawdzamy, czy pod spodem nie ma przepaści (Rug pull check)
+        if vol_wsparcia < 5000.0:
+            return True, f"PRZEPAŚĆ (Puste wsparcie pod ceną, tylko {vol_wsparcia:.0f}$)"
+            
+        return False, f"WSPARCIE OK (Stosunek {stosunek:.1f}x)"
+    except Exception as e:
+        return False, "Błąd skanera pancerza"
+
 def oblicz_przyspieszenie(symbol, current_price):
     teraz = time.time()
     if symbol not in historia_cen_local:
@@ -167,7 +208,6 @@ def oblicz_przyspieszenie(symbol, current_price):
     
     return v1 - v2 
 
-# --- SQL ---
 def pobierz_pozycje_skanera_z_bazy():
     try:
         db.cursor.execute("SELECT unikalne_id, symbol, cena_wejscia, czas_wejscia, max_zysk FROM aktywne_pozycje WHERE zrodlo='SKANER'")
@@ -214,13 +254,14 @@ def main():
     CZARNA_LISTA_HARD = ["USDC", "FDUSD", "USDP", "TUSD", "BUSD", "EUR", "DAI"] 
 
     print("=" * 70)
-    print(f"🚀 SKANER 4.0 (INTELIGENTNY RADAR + ŻELAZNA TARCZA) START")
+    print(f"🚀 SKANER 4.1 + MATADOR (ORDER BOOK X-RAY) START")
     print("=" * 70)
 
     while True:
-        konfig = pobierz_konfiguracje()
         teraz_ts = time.time()
         teraz_str = datetime.now().strftime("%H:%M:%S")
+        
+        limit_rsi = CFG_RSI_NIEDZIELA if datetime.today().weekday() == 6 else CFG_RSI
         
         dane = get_binance_prices()
         if not dane:
@@ -236,7 +277,7 @@ def main():
         cooldowny = {k: v for k, v in cooldowny.items() if v > teraz_ts}
         
         # ==================================================================
-        # 🛡️ ZARZĄDZANIE POZYCJĄ (ŻELAZNA TARCZA Z TERMUXA)
+        # 🛡️ ZARZĄDZANIE POZYCJĄ (ORYGINALNE)
         # ==================================================================
         moje = pobierz_pozycje_skanera_z_bazy()
         
@@ -257,27 +298,26 @@ def main():
             akcja = None
             powod = ""
 
-            # --- TWOJE ORYGINALNE, TWARDE REGUŁY BOJOWE Z TERMUXA ---
-            if zm <= -1.5:
-                akcja, powod = "STOP LOSS", f"Tarcza (Strata {zm:.2f}%)"
+            if zm <= -0.8:
+                akcja, powod = "STOP LOSS", f"Twarde cięcie (Strata {zm:.2f}%)"
 
-            elif max_z >= 1.5 and max_z < 3.0 and zm < (max_z - 0.7):
-                akcja, powod = "ZYSK", f"Bierz co dają (Spadek z {max_z:.2f}%)"
+            elif max_z >= 0.6 and zm <= 0.1:
+                akcja, powod = "BREAK EVEN", "Szybka ewakuacja na zero"
 
-            elif max_z >= 3.0 and max_z < 8.0 and zm < (max_z - 1.2):
-                akcja, powod = "TRAILING", f"Wytrzepanie (Spadek z {max_z:.2f}%)"
+            elif max_z >= 1.5 and max_z < 3.0 and zm < (max_z - 0.5):
+                akcja, powod = "ZYSK", f"Krótka smycz (Spadek z {max_z:.2f}%)"
 
-            elif max_z >= 8.0 and max_z < 25.0 and zm < (max_z - 2.0):
+            elif max_z >= 3.0 and max_z < 8.0 and zm < (max_z - 0.8):
+                akcja, powod = "TRAILING", f"Agresywny cień (Spadek z {max_z:.2f}%)"
+
+            elif max_z >= 8.0 and max_z < 25.0 and zm < (max_z - 1.5):
                 akcja, powod = "MOON-TRAIL", f"Koniec rajdu (Spadek z {max_z:.2f}%)"
 
             elif max_z >= 25.0 and zm < (max_z - 3.0):
                 akcja, powod = "HARD TAKE PROFIT", f"Wycofanie na szczycie (Zysk {zm:.2f}%)"
 
-            elif max_z >= 1.0 and zm <= 0.1:
-                akcja, powod = "BREAK EVEN", "Zabezpieczenie na zero"
-
-            elif czas_trwania >= 12 and zm < 0.5:
-                akcja, powod = "STAGNATION", "Brak paliwa (12min)"
+            elif czas_trwania >= 8 and zm < 0.3:
+                akcja, powod = "STAGNATION", "Brak szybkiego zapłonu (8min)"
 
             elif czas_trwania >= 60:
                 akcja, powod = "TIMEOUT", "Wycofanie oddziału (1h)"
@@ -321,7 +361,6 @@ def main():
             
             wszystkie_ruchy.sort(key=lambda x: x['z'], reverse=True)
             
-            # 🔥 INTELIGENTNY RADAR FRONTU (Adaptacja Prógów)
             skoki_powyzej_1 = sum(1 for k in wszystkie_ruchy if k['z'] >= 1.0)
             
             if datetime.today().weekday() == 6:
@@ -363,12 +402,23 @@ def main():
                 kandydaci = []
                 for k in wszystkie_ruchy:
                     if k['s'] in cooldowny or k['s'] in moje: continue
+                    
                     if k['z'] > 7.5: continue 
 
                     if k['z'] >= dynamiczny_prog:
                         acc = oblicz_przyspieszenie(k['s'], k['c'])
                         if acc < PROG_ACCEL: continue
                         if czy_na_czarnej_liscie(k['s']): continue
+
+                        # --- NOWOŚĆ: UKRYTY ZABÓJCA (SKANER SPREADU) ---
+                        sym_dane = dane[k['s']]
+                        bid = float(sym_dane['bidPrice'])
+                        ask = float(sym_dane['askPrice'])
+                        spread = ((ask - bid) / bid) * 100 if bid > 0 else 0.0
+                        
+                        if spread > 0.4:
+                            print(f"      🧨 ODRZUCONO {k['s']} (+{k['z']:.1f}%): Za duży spread ({spread:.2f}%)")
+                            continue
 
                         # 1. Zwiad 1M
                         rsi, vol_ratio, pole_minowe, raport_zwiadu = zwiad_bojowy(k['s'])
@@ -381,6 +431,12 @@ def main():
                         if pulapka:
                             print(f"      🧨 ODRZUCONO {k['s']} (+{k['z']:.1f}%): {raport_micro}")
                             continue
+                            
+                        # 3. NOWOŚĆ: MATADOR (ORDER BOOK X-RAY)
+                        pulapka_ob, raport_ob = skaner_pancerza(k['s'], k['c'])
+                        if pulapka_ob:
+                            print(f"      🧨 ODRZUCONO {k['s']} (+{k['z']:.1f}%): {raport_ob}")
+                            continue
 
                         decyzja = False
                         powod = ""
@@ -390,7 +446,7 @@ def main():
                             decyzja, powod = False, f"Zbyt duża anomalia (Vol > {MAX_VOL_RATIO}x) - Sztuczna pompa!"
                         elif vol_ratio < MIN_VOL_MULTI:
                             decyzja, powod = False, f"Pusta pompa (Vol < {MIN_VOL_MULTI}x) - Brak paliwa!"
-                        elif rsi < konfig['RSI']:
+                        elif rsi < limit_rsi:
                             decyzja, powod = True, f"Czysty rajd (RSI {rsi:.0f})"
                         elif rsi < 95 and vol_ratio >= 2.5:
                             decyzja, powod = True, f"Agresywna pompa (RSI {rsi:.0f}, Vol x{vol_ratio:.1f})"
